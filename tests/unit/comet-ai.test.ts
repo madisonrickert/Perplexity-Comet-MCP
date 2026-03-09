@@ -35,11 +35,11 @@ describe("CometAI.isResponseStable", () => {
     expect(ai.isResponseStable(ANSWER_B)).toBe(true); // stable again
   });
 
-  it("returns false for short responses (length <= 50) regardless of repetition", () => {
+  it("stabilizes short non-empty responses after the same threshold", () => {
     const ai = new CometAI(new FakeCdpClient());
     expect(ai.isResponseStable("short")).toBe(false);
     expect(ai.isResponseStable("short")).toBe(false);
-    expect(ai.isResponseStable("short")).toBe(false);
+    expect(ai.isResponseStable("short")).toBe(true);
   });
 
   it("returns false for empty responses regardless of repetition", () => {

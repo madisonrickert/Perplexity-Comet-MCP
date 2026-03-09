@@ -14,7 +14,8 @@ export type CometAIClient = Pick<typeof cometClient, "safeEvaluate" | "listTabsC
 
 // Input selectors - contenteditable div is primary for Perplexity
 const INPUT_SELECTORS = [
-  '[contenteditable="true"]',
+  '[role="textbox"]',
+  '[contenteditable]',
   'textarea[placeholder*="Ask"]',
   'textarea[placeholder*="Search"]',
   'textarea',
@@ -32,22 +33,47 @@ export class CometAI {
    * Find the first matching element from a list of selectors
    */
   private async findInputElement(): Promise<string | null> {
-    for (const selector of INPUT_SELECTORS) {
-      const result = await cometClient.evaluate(`
-        document.querySelector(${JSON.stringify(selector)}) !== null
-      `);
-      if (result.result.value === true) {
+    const result = await cometClient.evaluate(`
+      (() => {
+        const candidates = [...document.querySelectorAll('textarea, input[type="text"], [role="textbox"], [contenteditable]')]
+          .filter((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 &&
+              rect.height > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden';
+          })
+          .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
+
+        if (candidates.length === 0) return null;
+        const el = candidates[0];
+        if (el.matches('[contenteditable], [role="textbox"]')) return '[contenteditable]';
+        if (el.matches('textarea')) return 'textarea';
+        return 'input[type="text"]';
+      })()
+    `);
+
+    return (result.result.value as string | null) ?? null;
+  }
+
+  private async waitForInputElement(timeoutMs = 10000, intervalMs = 400): Promise<string | null> {
+    const start = Date.now();
+
+    while (Date.now() - start < timeoutMs) {
+      const selector = await this.findInputElement();
+      if (selector) {
         return selector;
       }
+
+      await new Promise(resolve => setTimeout(resolve, intervalMs));
     }
+
     return null;
   }
 
-  /**
-   * Send a prompt to Comet's AI (Perplexity)
-   */
   async sendPrompt(prompt: string): Promise<string> {
-    const inputSelector = await this.findInputElement();
+    const inputSelector = await this.waitForInputElement();
 
     if (!inputSelector) {
       throw new Error("Could not find input element. Navigate to Perplexity first.");
@@ -56,21 +82,35 @@ export class CometAI {
     // Use execCommand for contenteditable elements (works with React/Vue)
     const result = await cometClient.evaluate(`
       (() => {
-        const el = document.querySelector('[contenteditable="true"]');
-        if (el) {
-          el.focus();
+        const candidates = [...document.querySelectorAll('textarea, input[type="text"], [role="textbox"], [contenteditable]')]
+          .filter((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 &&
+              rect.height > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden';
+          })
+          .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
+
+        const el = candidates[0];
+        if (!el) return { success: false };
+
+        el.focus();
+
+        if (el.matches('[contenteditable], [role="textbox"]')) {
           document.execCommand('selectAll', false, null);
           document.execCommand('insertText', false, ${JSON.stringify(prompt)});
           return { success: true };
         }
-        // Fallback for textarea
-        const textarea = document.querySelector('textarea');
-        if (textarea) {
-          textarea.focus();
-          textarea.value = ${JSON.stringify(prompt)};
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
+
+        if ('value' in el) {
+          el.value = ${JSON.stringify(prompt)};
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
           return { success: true };
         }
+
         return { success: false };
       })()
     `);
@@ -86,9 +126,6 @@ export class CometAI {
     return `Prompt sent: "${prompt.substring(0, 50)}${prompt.length > 50 ? '...' : ''}"`;
   }
 
-  /**
-   * Submit the current prompt
-   */
   private async submitPrompt(): Promise<void> {
     // Wait for React to process the typed content
     await new Promise(resolve => setTimeout(resolve, 300));
@@ -96,11 +133,21 @@ export class CometAI {
     // Verify text was typed before attempting submit
     const hasContent = await cometClient.evaluate(`
       (() => {
-        const el = document.querySelector('[contenteditable="true"]');
-        if (el && el.innerText.trim().length > 0) return true;
-        const textarea = document.querySelector('textarea');
-        if (textarea && textarea.value.trim().length > 0) return true;
-        return false;
+        const candidates = [...document.querySelectorAll('textarea, input[type="text"], [role="textbox"], [contenteditable]')]
+          .filter((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 &&
+              rect.height > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden';
+          })
+          .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
+
+        const el = candidates[0];
+        if (!el) return false;
+        if (el.matches('[contenteditable], [role="textbox"]')) return el.innerText.trim().length > 0;
+        return 'value' in el && el.value.trim().length > 0;
       })()
     `);
 
@@ -111,8 +158,18 @@ export class CometAI {
     // Strategy 1: Simulate Enter key via DOM events (most reliable for contenteditable)
     const enterResult = await cometClient.evaluate(`
       (() => {
-        const el = document.querySelector('[contenteditable="true"]') ||
-                   document.querySelector('textarea');
+        const candidates = [...document.querySelectorAll('textarea, input[type="text"], [role="textbox"], [contenteditable]')]
+          .filter((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 &&
+              rect.height > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden';
+          })
+          .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
+
+        const el = candidates[0];
         if (!el) return { success: false, reason: 'no input element' };
 
         el.focus();
@@ -148,9 +205,20 @@ export class CometAI {
     // Check if submission worked
     const submitted = await cometClient.evaluate(`
       (() => {
-        const el = document.querySelector('[contenteditable="true"]');
-        // If input is empty or nearly empty, submission worked
-        if (el && el.innerText.trim().length < 5) return true;
+        const candidates = [...document.querySelectorAll('textarea, input[type="text"], [role="textbox"], [contenteditable]')]
+          .filter((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 &&
+              rect.height > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden';
+          })
+          .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
+
+        const el = candidates[0];
+        if (el && el.matches('[contenteditable], [role="textbox"]') && el.innerText.trim().length < 5) return true;
+        if (el && 'value' in el && el.value.trim().length < 5) return true;
         // Check for loading indicators
         const hasLoading = document.querySelector('[class*="animate-spin"], [class*="animate-pulse"]') !== null;
         const hasThinking = document.body.innerText.includes('Thinking');
@@ -180,8 +248,18 @@ export class CometAI {
         }
 
         // Find the submit button by position (usually rightmost button near input)
-        const inputEl = document.querySelector('[contenteditable="true"]') ||
-                        document.querySelector('textarea');
+        const candidates = [...document.querySelectorAll('textarea, input[type="text"], [role="textbox"], [contenteditable]')]
+          .filter((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 &&
+              rect.height > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden';
+          })
+          .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
+
+        const inputEl = candidates[0];
         if (inputEl) {
           const inputRect = inputEl.getBoundingClientRect();
           let parent = inputEl.parentElement;
@@ -229,8 +307,20 @@ export class CometAI {
     // Final verification and last resort
     const finalCheck = await cometClient.evaluate(`
       (() => {
-        const el = document.querySelector('[contenteditable="true"]');
-        if (el && el.innerText.trim().length < 5) return true;
+        const candidates = [...document.querySelectorAll('textarea, input[type="text"], [role="textbox"], [contenteditable]')]
+          .filter((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = window.getComputedStyle(el);
+            return rect.width > 0 &&
+              rect.height > 0 &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden';
+          })
+          .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
+
+        const el = candidates[0];
+        if (el && el.matches('[contenteditable], [role="textbox"]') && el.innerText.trim().length < 5) return true;
+        if (el && 'value' in el && el.value.trim().length < 5) return true;
         const hasLoading = document.querySelector('[class*="animate"]') !== null;
         const hasThinking = document.body.innerText.includes('Thinking');
         return hasLoading || hasThinking;
@@ -259,7 +349,7 @@ export class CometAI {
    * Check if response has stabilized (same content for multiple polls)
    */
   isResponseStable(currentResponse: string): boolean {
-    if (currentResponse && currentResponse.length > 50) {
+    if (currentResponse && currentResponse.trim().length > 0) {
       if (currentResponse === this.lastResponseText) {
         this.stableResponseCount++;
       } else {
@@ -310,7 +400,7 @@ export class CometAI {
     const isStable = this.isResponseStable(statusResult.response);
 
     // If response is stable and has content, override status to completed
-    if (isStable && statusResult.response.length > 50 && !statusResult.hasStopButton) {
+    if (isStable && statusResult.response.trim().length > 0 && !statusResult.hasStopButton) {
       statusResult.status = 'completed';
     }
 

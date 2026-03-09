@@ -36,33 +36,62 @@ export interface AgentStatusResult {
 export function extractAgentStatus(): AgentStatusResult {
   const body = document.body.innerText;
 
-  // Check for active stop button (more comprehensive check)
+  // Stop-button detection. Excludes modal dismiss/login buttons and requires
+  // a square `<rect>` (width ≈ height) for SVG-based stop indicators, which
+  // avoids false positives from non-square icons.
   let hasActiveStopButton = false;
   for (const btn of document.querySelectorAll("button")) {
-    const rect = btn.querySelector("rect");
     const ariaLabel = (btn.getAttribute("aria-label") || "").toLowerCase();
     const btnText = btn.innerText.toLowerCase();
 
-    // Stop button indicators: square icon (rect), "stop" label, or specific SVG patterns
+    if ((btn as HTMLButtonElement).offsetParent === null || (btn as HTMLButtonElement).disabled) continue;
+
+    const isDismissButton =
+      ariaLabel.includes("close") ||
+      ariaLabel.includes("dismiss") ||
+      ariaLabel.includes("sign") ||
+      ariaLabel.includes("login") ||
+      ariaLabel.includes("modal");
+
+    if (isDismissButton) continue;
+
+    const rectEl = btn.querySelector("rect");
+    const isSquareRect =
+      rectEl &&
+      Math.abs(
+        parseFloat(rectEl.getAttribute("width") || "0") -
+          parseFloat(rectEl.getAttribute("height") || "0")
+      ) < 4;
+
     const isStopButton =
-      rect ||
       ariaLabel.includes("stop") ||
       ariaLabel.includes("cancel") ||
-      btnText === "stop";
+      btnText === "stop" ||
+      isSquareRect;
 
-    if (isStopButton && (btn as HTMLButtonElement).offsetParent !== null && !(btn as HTMLButtonElement).disabled) {
+    if (isStopButton) {
       hasActiveStopButton = true;
       break;
     }
   }
 
-  // More comprehensive loading detection
-  const hasLoadingSpinner =
-    document.querySelector(
-      '[class*="animate-spin"], [class*="animate-pulse"], [class*="loading"], [class*="thinking"]'
-    ) !== null;
+  // Loading spinner detection scoped to exclude sidebar/modal/banner regions
+  // and zero-size elements, which previously caused status to hang in 'working'.
+  const hasLoadingSpinner = (() => {
+    const spinners = document.querySelectorAll(
+      '[class*="animate-spin"],[class*="animate-pulse"],[class*="loading"],[class*="thinking"]'
+    );
+    for (const el of spinners) {
+      if (el.closest('nav,aside,header,[role="dialog"],[role="banner"],[aria-modal]')) continue;
+      if (el.closest('[class*="sidebar"],[class*="modal"],[class*="overlay"],[class*="dialog"]')) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      return true;
+    }
+    return false;
+  })();
 
-  // Check for "Thinking" indicator specifically
+  // "Thinking" indicator (avoid matching "Thinking about" which is unrelated text)
   const hasThinkingIndicator = body.includes("Thinking") && !body.includes("Thinking about");
 
   const hasStepsCompleted = /\d+ steps? completed/i.test(body);
@@ -71,12 +100,19 @@ export function extractAgentStatus(): AgentStatusResult {
   const hasSourcesIndicator = /\d+\s*sources?/i.test(body); // "10 sources" etc
   const hasAskFollowUp = body.includes("Ask a follow-up") || body.includes("Ask follow-up");
 
-  // Check for prose content (actual response) - lowered threshold for short answers
+  // Prose-content threshold lowered to >0 so short answers (e.g. "2 + 2 = 4.")
+  // are detected. Sidebar/UI text is filtered out by prefix.
   const proseEls = [...document.querySelectorAll('[class*="prose"]')] as HTMLElement[];
   const hasProseContent = proseEls.some((el) => {
     const text = el.innerText.trim();
-    // Must have some content, not just UI text (lowered from 50 to 15 for short answers)
-    return text.length > 15 && !text.startsWith("Library") && !text.startsWith("Discover");
+    return (
+      text.length > 0 &&
+      !text.startsWith("Library") &&
+      !text.startsWith("Discover") &&
+      !text.startsWith("Spaces") &&
+      !text.startsWith("Finance") &&
+      !text.startsWith("Search")
+    );
   });
 
   const workingPatterns = [
@@ -87,28 +123,24 @@ export function extractAgentStatus(): AgentStatusResult {
   ];
   const hasWorkingText = workingPatterns.some((p) => body.includes(p));
 
-  // Determine status with improved logic
+  // Status determination. AskFollowUp+Prose ranks above LoadingSpinner because
+  // a visible follow-up prompt with prose is a stronger completion signal than
+  // a stale spinner sitting somewhere on the page.
   let status: "idle" | "working" | "completed" = "idle";
 
-  // FIRST: Check if actively working (stop button is the strongest indicator)
   if (hasActiveStopButton) {
     status = "working";
-  } else if (hasLoadingSpinner || hasThinkingIndicator) {
-    status = "working";
-  }
-  // SECOND: Check completion indicators BEFORE working text
-  // (because completed pages still show historical step text)
-  else if (hasStepsCompleted || hasFinishedMarker) {
-    status = "completed";
   } else if (hasAskFollowUp && hasProseContent) {
     status = "completed";
+  } else if (hasStepsCompleted || hasFinishedMarker) {
+    status = "completed";
+  } else if (hasLoadingSpinner || hasThinkingIndicator) {
+    status = "working";
   } else if (hasSourcesIndicator && hasProseContent && !hasActiveStopButton) {
     status = "completed";
   } else if (hasReviewedSources && !hasActiveStopButton) {
     status = "completed";
-  }
-  // THIRD: Fall back to working text patterns (only if no completion signals)
-  else if (hasWorkingText) {
+  } else if (hasWorkingText) {
     status = "working";
   }
 
@@ -123,9 +155,10 @@ export function extractAgentStatus(): AgentStatusResult {
     if (matches) steps.push(...matches.map((s) => s.trim().substring(0, 100)));
   }
 
-  // Extract response - get the FULL FINAL response after agent completes
+  // Response extraction runs unconditionally so idle-timeout and stability paths
+  // in the polling loop see the latest text even before status flips to completed.
   let response = "";
-  if (status === "completed") {
+  {
     const mainContent = (document.querySelector("main") || document.body) as HTMLElement;
     const bodyText = mainContent.innerText;
 
@@ -134,28 +167,20 @@ export function extractAgentStatus(): AgentStatusResult {
     if (stepsMatch) {
       const markerIndex = bodyText.indexOf(stepsMatch[0]);
       if (markerIndex !== -1) {
-        // Get everything after the marker
         let afterMarker = bodyText.substring(markerIndex + stepsMatch[0].length).trim();
-
-        // Remove the ">" or arrow that often follows
         afterMarker = afterMarker.replace(/^[>›→\s]+/, "").trim();
-
-        // Find where the response ends (before input area or UI elements)
         const endMarkers = ["Ask anything", "Ask a follow-up", "Add details", "Type a message"];
         let endIndex = afterMarker.length;
         for (const marker of endMarkers) {
           const idx = afterMarker.indexOf(marker);
-          if (idx !== -1 && idx < endIndex) {
-            endIndex = idx;
-          }
+          if (idx !== -1 && idx < endIndex) endIndex = idx;
         }
-
         response = afterMarker.substring(0, endIndex).trim();
       }
     }
 
     // Strategy 2: If no steps marker, look for content after source citations
-    if (!response || response.length < 50) {
+    if (!response || response.length < 1) {
       const sourcesMatch = bodyText.match(/Reviewed\s+\d+\s+sources?/i);
       if (sourcesMatch) {
         const markerIndex = bodyText.indexOf(sourcesMatch[0]);
@@ -173,7 +198,7 @@ export function extractAgentStatus(): AgentStatusResult {
     }
 
     // Strategy 3: Fallback - get all prose content combined
-    if (!response || response.length < 50) {
+    if (!response || response.length < 1) {
       const allProseEls = [...mainContent.querySelectorAll('[class*="prose"]')] as HTMLElement[];
       const validTexts = allProseEls
         .filter((el) => {
@@ -181,31 +206,28 @@ export function extractAgentStatus(): AgentStatusResult {
           const text = el.innerText.trim();
           const isUIText = ["Library", "Discover", "Spaces", "Finance", "Account",
                             "Upgrade", "Home", "Search"].some((ui) => text.startsWith(ui));
-          return !isUIText && text.length > 30;
+          return !isUIText && text.length > 0;
         })
         .map((el) => el.innerText.trim());
 
-      // Combine all valid prose texts, taking the last/most recent ones
       if (validTexts.length > 0) {
-        // Take last 3 prose blocks max (most recent response)
         response = validTexts.slice(-3).join("\n\n");
       }
     }
+  }
 
-    // Clean up response - preserve formatting but remove UI artifacts
-    if (response) {
-      response = response
-        .replace(/View All/gi, "")
-        .replace(/Show more/gi, "")
-        .replace(/Ask a follow-up/gi, "")
-        .replace(/Ask anything\.*/gi, "")
-        .replace(/Add details to this task\.*/gi, "")
-        .replace(/\d+\s*sources?\s*$/gi, "")
-        .replace(/[\u{1F300}-\u{1F9FF}]/gu, "") // Remove most emojis from UI
-        .replace(/^[>›→\s]+/gm, "") // Remove leading arrows
-        .replace(/\n{3,}/g, "\n\n") // Collapse multiple newlines
-        .trim();
-    }
+  if (response) {
+    response = response
+      .replace(/View All/gi, "")
+      .replace(/Show more/gi, "")
+      .replace(/Ask a follow-up/gi, "")
+      .replace(/Ask anything\.*/gi, "")
+      .replace(/Add details to this task\.*/gi, "")
+      .replace(/\d+\s*sources?\s*$/gi, "")
+      .replace(/[\u{1F300}-\u{1F9FF}]/gu, "")
+      .replace(/^[>›→\s]+/gm, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
   }
 
   return {
