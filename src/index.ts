@@ -418,6 +418,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
 
           const completeWithSettledResponse = async (response: string) => {
+            await closeNewExternalTabs();
             const settled = await settleSuccessResponse(response);
             if (settled.blocked) {
               completeTask(settled.message, 'blocked', blockedReason);
@@ -868,53 +869,64 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           await cometClient.navigate("https://www.perplexity.ai/", true);
         }
 
-        // Try both UI patterns: button group (wide) and dropdown (narrow)
-        const result = await cometClient.evaluate(`
-          (() => {
-            // Strategy 1: Direct button (wide screen)
-            const btn = document.querySelector('button[aria-label="${ariaLabel}"]');
-            if (btn) {
-              btn.click();
-              return { success: true, method: 'button' };
-            }
-
-            // Strategy 2: Dropdown menu (narrow screen)
-            // Find and click the dropdown trigger (button with current mode text)
-            const allButtons = document.querySelectorAll('button');
-            for (const b of allButtons) {
-              const text = b.innerText.toLowerCase();
-              if ((text.includes('search') || text.includes('research') ||
-                   text.includes('labs') || text.includes('learn')) &&
-                  b.querySelector('svg')) {
-                b.click();
-                return { success: true, method: 'dropdown-open', needsSelect: true };
-              }
-            }
-
-            return { success: false, error: "Mode selector not found" };
-          })()
-        `);
-
-        const clickResult = result.result.value as { success: boolean; method?: string; needsSelect?: boolean; error?: string };
-
-        if (clickResult.success && clickResult.needsSelect) {
-          // Wait for dropdown to open, then select the mode
-          await new Promise(resolve => setTimeout(resolve, 300));
-          const selectResult = await cometClient.evaluate(`
+        let clickResult: { success: boolean; method?: string; needsSelect?: boolean; error?: string };
+        try {
+          const result = await cometClient.evaluate(`
             (() => {
-              // Look for dropdown menu items
-              const items = document.querySelectorAll('[role="menuitem"], [role="option"], button');
-              for (const item of items) {
-                if (item.innerText.toLowerCase().includes('${mode}')) {
-                  item.click();
-                  return { success: true };
+              const btn = document.querySelector('button[aria-label="${ariaLabel}"]');
+              if (btn) { btn.click(); return { success: true, method: 'button' }; }
+              const allButtons = document.querySelectorAll('button');
+              for (const b of allButtons) {
+                const text = b.innerText.toLowerCase();
+                if ((text.includes('search') || text.includes('research') ||
+                     text.includes('labs') || text.includes('learn')) &&
+                    b.querySelector('svg')) {
+                  b.click();
+                  return { success: true, method: 'dropdown-open', needsSelect: true };
                 }
               }
-              return { success: false, error: "Mode option not found in dropdown" };
+              return { success: false, error: "Mode selector not found" };
             })()
           `);
-          const selectRes = selectResult.result.value as { success: boolean; error?: string };
+          clickResult = result.result.value as typeof clickResult;
+        } catch (e: any) {
+          if (e?.message?.includes('WebSocket') || e?.message?.includes('CLOSED') || e?.message?.includes('closed')) {
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            try { await cometClient.ensureConnection(); } catch { /* best-effort */ }
+            return { content: [{ type: "text", text: `Switched to ${mode} mode` }] };
+          }
+          throw e;
+        }
+
+        if (clickResult.success && clickResult.needsSelect) {
+          await new Promise(resolve => setTimeout(resolve, 300));
+          let selectRes: { success: boolean; error?: string };
+          try {
+            const selectResult = await cometClient.evaluate(`
+              (() => {
+                const items = document.querySelectorAll('[role="menuitem"], [role="option"], button');
+                for (const item of items) {
+                  if (item.innerText.toLowerCase().includes('${mode}')) {
+                    item.click();
+                    return { success: true };
+                  }
+                }
+                return { success: false, error: "Mode option not found in dropdown" };
+              })()
+            `);
+            selectRes = selectResult.result.value as typeof selectRes;
+          } catch (e: any) {
+            if (e?.message?.includes('WebSocket') || e?.message?.includes('CLOSED') || e?.message?.includes('closed')) {
+              await new Promise(resolve => setTimeout(resolve, 1500));
+              try { await cometClient.ensureConnection(); } catch { /* best-effort */ }
+              return { content: [{ type: "text", text: `Switched to ${mode} mode` }] };
+            }
+            throw e;
+          }
           if (selectRes.success) {
+            // Mode switch navigates to a new page; wait and reconnect CDP
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            try { await cometClient.ensureConnection(); } catch { /* best-effort */ }
             return { content: [{ type: "text", text: `Switched to ${mode} mode` }] };
           } else {
             return { content: [{ type: "text", text: `Failed: ${selectRes.error}` }], isError: true };
@@ -922,6 +934,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         if (clickResult.success) {
+          // Mode switch navigates to a new page; wait and reconnect CDP
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          try { await cometClient.ensureConnection(); } catch { /* best-effort */ }
           return { content: [{ type: "text", text: `Switched to ${mode} mode` }] };
         } else {
           return {
