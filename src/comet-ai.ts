@@ -29,6 +29,47 @@ export class CometAI {
     this.client = client;
   }
 
+  async getBrowserBlockState(): Promise<{
+    blocked: boolean;
+    blockedReason?: "login_required";
+    blockedMessage?: string;
+  }> {
+    const result = await this.client.safeEvaluate(`
+      (() => {
+        const body = document.body.innerText;
+        const hasLoggedOutBrowserText = body.includes("Comet Assistant can't use the browser when logged out");
+        const hasUnlockCapabilitiesText = body.includes('Log in to unlock full capabilities');
+        const hasSignInAccountText = body.includes('Sign in or create an account');
+        const hasVisibleLoginDialog = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog')].some(el => {
+          if (!(el instanceof HTMLElement) || el.offsetParent === null) return false;
+          const text = (el.textContent || '').toLowerCase();
+          return text.includes('sign in') ||
+            text.includes('log in') ||
+            text.includes('create an account') ||
+            text.includes('continue with google') ||
+            text.includes('continue with apple');
+        });
+
+        const blocked = hasLoggedOutBrowserText ||
+          ((hasUnlockCapabilitiesText || hasSignInAccountText) && hasVisibleLoginDialog);
+
+        return {
+          blocked,
+          blockedReason: blocked ? 'login_required' : undefined,
+          blockedMessage: blocked
+            ? 'Comet browser automation is unavailable because the browser is logged out. Sign in to unlock full capabilities.'
+            : undefined,
+        };
+      })()
+    `);
+
+    return (result.result.value as {
+      blocked: boolean;
+      blockedReason?: "login_required";
+      blockedMessage?: string;
+    }) ?? { blocked: false };
+  }
+
   /**
    * Find the first matching element from a list of selectors
    */

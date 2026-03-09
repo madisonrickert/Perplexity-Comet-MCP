@@ -337,32 +337,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
 
             try {
-              const blockedResult = await Promise.race([
-                cometClient.evaluate(`
-                  (() => {
-                    const body = document.body.innerText;
-                    const hasLoggedOutBrowserText = body.includes("Comet Assistant can't use the browser when logged out");
-                    const hasUnlockCapabilitiesText = body.includes('Log in to unlock full capabilities');
-                    const hasSignInAccountText = body.includes('Sign in or create an account');
-                    const hasVisibleLoginDialog = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog')].some(el => {
-                      if (!(el instanceof HTMLElement) || el.offsetParent === null) return false;
-                      const text = (el.textContent || '').toLowerCase();
-                      return text.includes('sign in') ||
-                        text.includes('log in') ||
-                        text.includes('create an account') ||
-                        text.includes('continue with google') ||
-                        text.includes('continue with apple');
-                    });
-                    return hasLoggedOutBrowserText ||
-                      ((hasUnlockCapabilitiesText || hasSignInAccountText) && hasVisibleLoginDialog);
-                  })()
-                `),
+              const browserBlockState = await Promise.race([
+                cometAI.getBrowserBlockState(),
                 new Promise<never>((_, reject) => setTimeout(() => reject(new Error('blocked_check_timeout')), 2000))
               ]);
 
-              if (blockedResult?.result?.value) {
-                blockedReason = 'login_required';
-                blockedMessage = 'Comet browser automation is unavailable because the browser is logged out. Sign in to unlock full capabilities.';
+              if (browserBlockState?.blocked) {
+                blockedReason = browserBlockState.blockedReason || 'login_required';
+                blockedMessage = browserBlockState.blockedMessage || 'Comet browser automation is unavailable because the browser is logged out. Sign in to unlock full capabilities.';
                 return true;
               }
             } catch {
@@ -390,6 +372,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             return { blocked: false as const };
           };
 
+          const completeWithSettledResponse = async (response: string) => {
+            const settled = await settleSuccessResponse(response);
+            if (settled.blocked) {
+              completeTask(settled.message, 'blocked', blockedReason);
+              return { content: [{ type: "text", text: settled.message }] };
+            }
+
+            completeTask(response);
+            return { content: [{ type: "text", text: response }] };
+          };
+
           while (Date.now() - startTime < maxTimeout) {
             await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
 
@@ -401,14 +394,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
 
             if (elapsed > 8000 && lastKnownResponse.length > 0 && !lastKnownHasStopButton && !(needsAgenticBrowsing && blockedReason)) {
-              const settled = await settleSuccessResponse(lastKnownResponse);
-              if (settled.blocked) {
-                completeTask(settled.message, 'blocked', blockedReason);
-                return { content: [{ type: "text", text: settled.message }] };
-              }
-
-              completeTask(lastKnownResponse);
-              return { content: [{ type: "text", text: lastKnownResponse }] };
+              return await completeWithSettledResponse(lastKnownResponse);
             }
 
             try {
@@ -470,39 +456,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                       cometClient.evaluate(`
                         (() => {
                           const els = [...document.querySelectorAll('[class*="prose"]')];
-                          const body = document.body.innerText;
-                          const hasLoggedOutBrowserText = body.includes("Comet Assistant can't use the browser when logged out");
-                          const hasUnlockCapabilitiesText = body.includes('Log in to unlock full capabilities');
-                          const hasSignInAccountText = body.includes('Sign in or create an account');
-                          const hasVisibleLoginDialog = [...document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog')].some(el => {
-                            if (!(el instanceof HTMLElement) || el.offsetParent === null) return false;
-                            const text = (el.textContent || '').toLowerCase();
-                            return text.includes('sign in') ||
-                              text.includes('log in') ||
-                              text.includes('create an account') ||
-                              text.includes('continue with google') ||
-                              text.includes('continue with apple');
-                          });
-                          const blocked = hasLoggedOutBrowserText ||
-                            ((hasUnlockCapabilitiesText || hasSignInAccountText) && hasVisibleLoginDialog);
-                          return {
-                            text: els.map(e => e.innerText.trim()).filter(t => t.length > 20).join('\\n\\n'),
-                            blocked,
-                          };
+                          return els.map(e => e.innerText.trim()).filter(t => t.length > 20).join('\\n\\n');
                         })()
                       `),
                       new Promise<never>((_, reject) => setTimeout(() => reject(new Error('direct_timeout')), 1500))
                     ]);
-                    const value = directResult?.result?.value as { text?: string; blocked?: boolean } | undefined;
-                    const text = value?.text || '';
+                    const text = (directResult?.result?.value as string | undefined) || '';
                     if (text && text.length > 0) {
                       lastKnownResponse = text;
                       lastKnownHasStopButton = false;
                     }
-                    if (needsAgenticBrowsing && value?.blocked) {
-                      blockedReason = 'login_required';
-                      blockedMessage = 'Comet browser automation is unavailable because the browser is logged out. Sign in to unlock full capabilities.';
-                    }
+                    await detectBrowserBlocked();
                   } catch { /* ignore */ }
                   continue;
                 }
@@ -539,38 +503,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               }
 
               if (status.status === 'completed' && sawNewResponse && status.response) {
-                const settled = await settleSuccessResponse(status.response);
-                if (settled.blocked) {
-                  completeTask(settled.message, 'blocked', blockedReason);
-                  return { content: [{ type: "text", text: settled.message }] };
-                }
-
-                completeTask(status.response);
-                return { content: [{ type: "text", text: status.response }] };
+                return await completeWithSettledResponse(status.response);
               }
 
               if (status.isStable && sawNewResponse && status.response && !status.hasStopButton) {
-                const settled = await settleSuccessResponse(status.response);
-                if (settled.blocked) {
-                  completeTask(settled.message, 'blocked', blockedReason);
-                  return { content: [{ type: "text", text: settled.message }] };
-                }
-
-                completeTask(status.response);
-                return { content: [{ type: "text", text: status.response }] };
+                return await completeWithSettledResponse(status.response);
               }
 
               const idleTime = Date.now() - lastActivityTime;
               if (idleTime > IDLE_TIMEOUT && sawNewResponse && status.response &&
                   status.response.length > 0 && !status.hasStopButton) {
-                const settled = await settleSuccessResponse(status.response);
-                if (settled.blocked) {
-                  completeTask(settled.message, 'blocked', blockedReason);
-                  return { content: [{ type: "text", text: settled.message }] };
-                }
-
-                completeTask(status.response);
-                return { content: [{ type: "text", text: status.response }] };
+                return await completeWithSettledResponse(status.response);
               }
 
             } catch {
@@ -606,14 +549,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           if (lastKnownResponse.length > 0) {
-            const settled = await settleSuccessResponse(lastKnownResponse);
-            if (settled.blocked) {
-              completeTask(settled.message, 'blocked', blockedReason);
-              return { content: [{ type: "text", text: settled.message }] };
-            }
-
-            completeTask(lastKnownResponse);
-            return { content: [{ type: "text", text: lastKnownResponse }] };
+            return await completeWithSettledResponse(lastKnownResponse);
           }
 
           // Max timeout reached without detecting completion. Surface a "still

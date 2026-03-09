@@ -10,9 +10,10 @@ All notable changes to this project will be documented in this file.
 - Documented that local MCP clients configured to run `dist/index.js` must rebuild and restart the MCP child process after source changes before validating behavior.
 - Documented that the current MCP runtime should be used sequentially: one `comet_ask` at a time per Comet browser session.
 
-### In Progress
+### Fixed
 
-- Tightening `comet_ask` so browser-required prompts return an explicit blocked state when Comet shows the logged-out browser-capability warning instead of silently treating the assistant text as a successful browser action.
+- `comet_ask` now returns an explicit blocked state when browser-required prompts hit Comet's logged-out browser-capability warning instead of silently treating assistant text as a successful browser action.
+- Blocked browser tasks now clean up any external browsing tabs opened during the task instead of leaving lingering agent-browsing tabs behind.
 
 ## [2.6.2] - 2026-01-11
 
