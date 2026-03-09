@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Updated developer documentation to use `pnpm` for local install/build/test commands.
+- Documented that local MCP clients configured to run `dist/index.js` must rebuild and restart the MCP child process after source changes before validating behavior.
+
+### In Progress
+
+- Tightening `comet_ask` so browser-required prompts return an explicit blocked state when Comet shows the logged-out browser-capability warning instead of silently treating the assistant text as a successful browser action.
+
 ## [2.6.2] - 2026-01-11
 
 ### Fixed

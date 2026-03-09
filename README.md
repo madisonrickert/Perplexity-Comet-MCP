@@ -78,8 +78,8 @@ npm install -g perplexity-comet-mcp
 ```bash
 git clone https://github.com/RapierCraft/perplexity-comet-mcp.git
 cd perplexity-comet-mcp
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
 ### Configure Claude Code
@@ -382,6 +382,21 @@ comet_ask prompt="..." timeout=180000
 
 ---
 
+**Problem:** Local source changes do not show up in MCP behavior
+
+**Explanation:** Most MCP clients run the compiled file at `dist/index.js`, not the TypeScript source in `src/`.
+
+**Solution:** After every source change, rebuild and restart the MCP child process before testing:
+
+```bash
+pnpm run build
+python3 -c "import subprocess; out = subprocess.check_output(['ps','-axo','pid=,command='], text=True); [subprocess.run(['kill', l.strip().split(None,1)[0]]) for l in out.splitlines() if '/absolute/path/to/perplexity-comet-mcp/dist/index.js' in l]"
+```
+
+If your MCP client points at a different path, replace the `dist/index.js` path in the restart command.
+
+---
+
 ### Windows-Specific Issues
 
 **Problem:** `ECONNRESET` errors on Windows
@@ -447,20 +462,22 @@ wsl --shutdown
 ```bash
 git clone https://github.com/RapierCraft/perplexity-comet-mcp.git
 cd perplexity-comet-mcp
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
+
+If your MCP client is configured to run `dist/index.js`, rebuild and restart the MCP child process after each code change before validating behavior.
 
 ### Run in Development
 
 ```bash
-npm run dev
+pnpm run dev
 ```
 
 ### Run Tests
 
 ```bash
-npm test
+pnpm test
 ```
 
 ### Project Structure
