@@ -229,9 +229,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
+        let newChatTabId: string | null = null;
+
         if (newChat) {
           await cometClient.ensureConnection();
           const newTabTarget = await cometClient.newTab('about:blank');
+          newChatTabId = newTabTarget.id;
           await cometClient.connect(newTabTarget.id);
           await cometClient.navigate('https://www.perplexity.ai/', true);
           await new Promise(resolve => setTimeout(resolve, 1500));
@@ -252,196 +255,202 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         }
 
-        // Reset stability tracking for new prompt
-        cometAI.resetStabilityTracking();
+        const closeNewChatTab = async () => {
+          if (newChatTabId) {
+            try { await cometClient.closeTab(newChatTabId); } catch { /* ignore */ }
+            newChatTabId = null;
+          }
+        };
 
-        // Capture old response state BEFORE sending prompt (for follow-up detection)
-        const oldStateResult = await cometClient.evaluate(`(${readProseState.toString()})()`);
-        const oldState = oldStateResult.result.value as ProseState;
+        try {
+          // startNewTask already resets stability tracking; no need to duplicate.
+          // Capture old response state BEFORE sending prompt (for follow-up detection)
+          const oldStateResult = await cometClient.evaluate(`(${readProseState.toString()})()`);
+          const oldState = oldStateResult.result.value as ProseState;
 
-        // Send the prompt
-        await cometAI.sendPrompt(prompt);
+          await cometAI.sendPrompt(prompt);
 
-        // Smart polling - detect completion based on activity, not fixed timeout
-        const startTime = Date.now();
-        const stepsCollected: string[] = [];
-        let sawNewResponse = newChat ? true : false;
-        let lastActivityTime = Date.now();
-        let previousResponse = '';
-        const POLL_INTERVAL = 600; // Poll every 600ms for faster detection of quick responses
-        const IDLE_TIMEOUT = 3000; // If no activity for 3s and we have a response, consider done
-        let consecutiveErrors = 0;
-        const MAX_CONSECUTIVE_ERRORS = 5;
-        let lastKnownResponse = '';
-        let lastKnownHasStopButton = true;
-        let statusPollInFlight: Promise<Awaited<ReturnType<typeof cometAI.getAgentStatus>>> | null = null;
+          const startTime = Date.now();
+          const stepsCollected: string[] = [];
+          let sawNewResponse = newChat ? true : false;
+          let lastActivityTime = Date.now();
+          let previousResponse = '';
+          const POLL_INTERVAL = 600;
+          const IDLE_TIMEOUT = 3000;
+          let consecutiveErrors = 0;
+          const MAX_CONSECUTIVE_ERRORS = 5;
+          let lastKnownResponse = '';
+          let lastKnownHasStopButton = true;
+          let statusPollInFlight: Promise<Awaited<ReturnType<typeof cometAI.getAgentStatus>>> | null = null;
 
-        while (Date.now() - startTime < maxTimeout) {
-          await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+          while (Date.now() - startTime < maxTimeout) {
+            await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
 
-          // Time-based safety net: outside try-catch so it fires even during error storms
-          const elapsed = Date.now() - startTime;
-          if (elapsed > 8000 && lastKnownResponse.length > 0 && !lastKnownHasStopButton) {
+            const elapsed = Date.now() - startTime;
+            if (elapsed > 8000 && lastKnownResponse.length > 0 && !lastKnownHasStopButton) {
+              completeTask(lastKnownResponse);
+              return { content: [{ type: "text", text: lastKnownResponse }] };
+            }
+
+            try {
+              const isOnPerplexity = await Promise.race([
+                cometClient.isOnPerplexityTab(),
+                new Promise<boolean>(resolve => setTimeout(() => resolve(true), 2000))
+              ]);
+              if (!isOnPerplexity) {
+                const switched = await Promise.race([
+                  cometClient.ensureOnPerplexityTab(),
+                  new Promise<boolean>(resolve => setTimeout(() => resolve(false), 3000))
+                ]);
+                if (!switched) {
+                  consecutiveErrors++;
+                  continue;
+                }
+              }
+
+              const currentStateResult = await Promise.race([
+                cometClient.withAutoReconnect(async () => {
+                  return await cometClient.evaluate(`
+                    (() => {
+                      const proseEls = document.querySelectorAll('[class*="prose"]');
+                      const lastProse = proseEls[proseEls.length - 1];
+                      return {
+                        count: proseEls.length,
+                        lastText: lastProse ? lastProse.innerText.substring(0, 100) : ''
+                      };
+                    })()
+                  `);
+                }),
+                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('state_timeout')), 3000))
+              ]);
+              const currentState = currentStateResult.result.value as { count: number; lastText: string };
+
+              if (!sawNewResponse) {
+                if (currentState.count > oldState.count ||
+                    (currentState.lastText && currentState.lastText !== oldState.lastText)) {
+                  sawNewResponse = true;
+                }
+              }
+
+              let status: Awaited<ReturnType<typeof cometAI.getAgentStatus>>;
+              try {
+                if (!statusPollInFlight) {
+                  statusPollInFlight = cometAI.getAgentStatus().finally(() => {
+                    statusPollInFlight = null;
+                  });
+                }
+
+                status = await Promise.race([
+                  statusPollInFlight,
+                  new Promise<never>((_, reject) => setTimeout(() => reject(new Error('status_timeout')), 4000))
+                ]);
+              } catch (statusError) {
+                if (String(statusError).includes('status_timeout')) {
+                  try {
+                    const directResult = await Promise.race([
+                      cometClient.evaluate(`
+                        (() => {
+                          const els = [...document.querySelectorAll('[class*="prose"]')];
+                          return els.map(e => e.innerText.trim()).filter(t => t.length > 20).join('\\n\\n');
+                        })()
+                      `),
+                      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('direct_timeout')), 1500))
+                    ]);
+                    const text = directResult?.result?.value as string;
+                    if (text && text.length > 0) {
+                      lastKnownResponse = text;
+                      lastKnownHasStopButton = false;
+                    }
+                  } catch { /* ignore */ }
+                  continue;
+                }
+                throw statusError;
+              }
+
+              consecutiveErrors = 0;
+
+              if (status.response && status.response.length > 0) {
+                lastKnownResponse = status.response;
+                lastKnownHasStopButton = status.hasStopButton;
+              }
+
+              if (status.response !== previousResponse) {
+                lastActivityTime = Date.now();
+                previousResponse = status.response;
+              }
+
+              for (const step of status.steps) {
+                if (!stepsCollected.includes(step)) {
+                  stepsCollected.push(step);
+                  lastActivityTime = Date.now();
+                }
+              }
+
+              sessionState.steps = stepsCollected;
+
+              if (status.status === 'completed' && sawNewResponse && status.response) {
+                completeTask(status.response);
+                return { content: [{ type: "text", text: status.response }] };
+              }
+
+              if (status.isStable && sawNewResponse && status.response && !status.hasStopButton) {
+                completeTask(status.response);
+                return { content: [{ type: "text", text: status.response }] };
+              }
+
+              const idleTime = Date.now() - lastActivityTime;
+              if (idleTime > IDLE_TIMEOUT && sawNewResponse && status.response &&
+                  status.response.length > 0 && !status.hasStopButton) {
+                completeTask(status.response);
+                return { content: [{ type: "text", text: status.response }] };
+              }
+
+            } catch (pollError) {
+              consecutiveErrors++;
+
+              try {
+                const recovered = await cometClient.ensureOnPerplexityTab();
+                if (recovered) {
+                  consecutiveErrors = Math.max(0, consecutiveErrors - 1);
+                  continue;
+                }
+              } catch {
+                /* empty */
+              }
+
+              if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                try {
+                  await cometClient.ensureConnection();
+                  await cometClient.ensureOnPerplexityTab();
+                  consecutiveErrors = 0;
+                } catch {
+                  break;
+                }
+              }
+              continue;
+            }
+          }
+
+          if (lastKnownResponse.length > 0) {
             completeTask(lastKnownResponse);
             return { content: [{ type: "text", text: lastKnownResponse }] };
           }
 
-          try {
-            const isOnPerplexity = await Promise.race([
-              cometClient.isOnPerplexityTab(),
-              new Promise<boolean>(resolve => setTimeout(() => resolve(true), 2000))
-            ]);
-            if (!isOnPerplexity) {
-              const switched = await Promise.race([
-                cometClient.ensureOnPerplexityTab(),
-                new Promise<boolean>(resolve => setTimeout(() => resolve(false), 3000))
-              ]);
-              if (!switched) {
-                consecutiveErrors++;
-                continue;
-              }
-            }
-
-            // Check if we have a NEW response (more prose elements or different text)
-            const currentStateResult = await Promise.race([
-              cometClient.withAutoReconnect(async () => {
-                return await cometClient.evaluate(`(${readProseState.toString()})()`);
-              }),
-              new Promise<never>((_, reject) => setTimeout(() => reject(new Error('state_timeout')), 3000))
-            ]);
-            const currentState = currentStateResult.result.value as ProseState;
-
-            // Detect new response
-            if (!sawNewResponse) {
-              if (currentState.count > oldState.count ||
-                  (currentState.lastText && currentState.lastText !== oldState.lastText)) {
-                sawNewResponse = true;
-              }
-            }
-
-            let status: Awaited<ReturnType<typeof cometAI.getAgentStatus>>;
-            try {
-              if (!statusPollInFlight) {
-                statusPollInFlight = cometAI.getAgentStatus().finally(() => {
-                  statusPollInFlight = null;
-                });
-              }
-
-              status = await Promise.race([
-                statusPollInFlight,
-                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('status_timeout')), 4000))
-              ]);
-            } catch (statusError) {
-              if (String(statusError).includes('status_timeout')) {
-                try {
-                  const directResult = await Promise.race([
-                    cometClient.evaluate(`
-                      (() => {
-                        const els = [...document.querySelectorAll('[class*="prose"]')];
-                        return els.map(e => e.innerText.trim()).filter(t => t.length > 20).join('\\n\\n');
-                      })()
-                    `),
-                    new Promise<never>((_, reject) => setTimeout(() => reject(new Error('direct_timeout')), 1500))
-                  ]);
-                  const text = directResult?.result?.value as string;
-                  if (text && text.length > 0) {
-                    lastKnownResponse = text;
-                    lastKnownHasStopButton = false;
-                  }
-                } catch { /* ignore */ }
-                continue;
-              }
-              throw statusError;
-            }
-
-            consecutiveErrors = 0;
-
-            if (status.response && status.response.length > 0) {
-              lastKnownResponse = status.response;
-              lastKnownHasStopButton = status.hasStopButton;
-            }
-
-            // Track activity - if response changed, update activity time
-            if (status.response !== previousResponse) {
-              lastActivityTime = Date.now();
-              previousResponse = status.response;
-            }
-
-            // Collect steps
-            for (const step of status.steps) {
-              if (!stepsCollected.includes(step)) {
-                stepsCollected.push(step);
-                lastActivityTime = Date.now();
-              }
-            }
-
-            // Track steps in session state
-            sessionState.steps = stepsCollected;
-
-            // COMPLETION CONDITIONS (return immediately when any are met):
-
-            // 1. Explicit completion detected by status checker
-            if (status.status === 'completed' && sawNewResponse && status.response) {
-              completeTask(status.response);
-              return { content: [{ type: "text", text: status.response }] };
-            }
-
-            // 2. Response is stable (same content for 2+ polls) and no stop button
-            if (status.isStable && sawNewResponse && status.response && !status.hasStopButton) {
-              completeTask(status.response);
-              return { content: [{ type: "text", text: status.response }] };
-            }
-
-            // 3. Idle timeout - no activity for 3s and we have a response
-            const idleTime = Date.now() - lastActivityTime;
-            if (idleTime > IDLE_TIMEOUT && sawNewResponse && status.response &&
-                status.response.length > 0 && !status.hasStopButton) {
-              completeTask(status.response);
-              return { content: [{ type: "text", text: status.response }] };
-            }
-
-          } catch (pollError) {
-            consecutiveErrors++;
-
-            try {
-              const recovered = await cometClient.ensureOnPerplexityTab();
-              if (recovered) {
-                consecutiveErrors = Math.max(0, consecutiveErrors - 1);
-                continue;
-              }
-            } catch {
-              // Continue to fallback
-            }
-
-            if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-              try {
-                await cometClient.ensureConnection();
-                await cometClient.ensureOnPerplexityTab();
-                consecutiveErrors = 0;
-              } catch {
-                break;
-              }
-            }
-            continue;
+          // Max timeout reached without detecting completion. Surface a "still
+          // in progress" hint with the steps collected so far so the caller
+          // can decide whether to comet_poll or comet_stop.
+          let inProgressMsg = `Task may still be in progress (max timeout reached).\n`;
+          inProgressMsg += `Status: WORKING\n`;
+          if (stepsCollected.length > 0) {
+            inProgressMsg += `\nSteps:\n${stepsCollected.map(s => `  • ${s}`).join('\n')}\n`;
           }
-        }
+          inProgressMsg += `\nUse comet_poll to check progress or comet_stop to cancel.`;
 
-        // Max timeout reached - return whatever we have
-        if (lastKnownResponse.length > 0) {
-          completeTask(lastKnownResponse);
-          return { content: [{ type: "text", text: lastKnownResponse }] };
+          sessionState.steps = stepsCollected;
+          return { content: [{ type: "text", text: inProgressMsg }] };
+        } finally {
+          await closeNewChatTab();
         }
-
-        let inProgressMsg = `Task may still be in progress (max timeout reached).\n`;
-        inProgressMsg += `Status: WORKING\n`;
-        if (stepsCollected.length > 0) {
-          inProgressMsg += `\nSteps:\n${stepsCollected.map(s => `  • ${s}`).join('\n')}\n`;
-        }
-        inProgressMsg += `\nUse comet_poll to check progress or comet_stop to cancel.`;
-
-        // Keep task active since it may still be running
-        sessionState.steps = stepsCollected;
-        return { content: [{ type: "text", text: inProgressMsg }] };
       }
 
       case "comet_poll": {
