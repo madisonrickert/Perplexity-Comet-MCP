@@ -633,7 +633,7 @@ export class CometCDPClient {
   /**
    * Navigate to URL, reusing existing tab if one exists for that domain
    */
-  async navigateOrReuseTab(url: string, purpose: TabContext['purpose'] = 'agent-browsing'): Promise<{ tabId: string; reused: boolean }> {
+  async navigateOrReuseTab(url: string, purpose: TabContext['purpose'] = 'agent-browsing', taskId?: string): Promise<{ tabId: string; reused: boolean }> {
     const domain = this.extractDomain(url);
 
     // Check if we already have a tab for this domain
@@ -643,7 +643,7 @@ export class CometCDPClient {
       // Reuse existing tab
       await this.connect(existingTab.id);
       await this.navigate(url, true);
-      this.setTabPurpose(existingTab.id, purpose);
+      this.setTabPurpose(existingTab.id, purpose, taskId);
       return { tabId: existingTab.id, reused: true };
     }
 
@@ -660,6 +660,7 @@ export class CometCDPClient {
       purpose,
       domain,
       lastActivity: Date.now(),
+      taskId,
     };
     this.tabRegistry.set(newTab.id, context);
 

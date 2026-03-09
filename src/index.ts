@@ -230,6 +230,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         let newChatTabId: string | null = null;
+        const baselineExternalTabIds = new Set(
+          (await cometClient.getTabContexts())
+            .filter(tab => tab.purpose !== 'main')
+            .map(tab => tab.id)
+        );
 
         if (newChat) {
           await cometClient.ensureConnection();
@@ -259,6 +264,31 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           if (newChatTabId) {
             try { await cometClient.closeTab(newChatTabId); } catch { /* ignore */ }
             newChatTabId = null;
+          }
+        };
+
+        const closeNewExternalTabs = async () => {
+          if (!needsAgenticBrowsing) {
+            return;
+          }
+
+          try {
+            const currentTabs = await cometClient.getTabContexts();
+            for (const tab of currentTabs) {
+              if (tab.purpose === 'main') {
+                continue;
+              }
+
+              if (!baselineExternalTabIds.has(tab.id)) {
+                try {
+                  await cometClient.closeTab(tab.id);
+                } catch {
+                  /* ignore */
+                }
+              }
+            }
+          } catch {
+            /* ignore */
           }
         };
 
@@ -599,6 +629,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           sessionState.steps = stepsCollected;
           return { content: [{ type: "text", text: inProgressMsg }] };
         } finally {
+          await closeNewExternalTabs();
           await closeNewChatTab();
         }
       }
@@ -762,15 +793,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
 
           case 'close': {
-            // Safety check: don't close if it would leave no browsing tabs
-            const allTabs = await cometClient.getTabContexts();
-
-            // allTabs now only contains external tabs (Perplexity is filtered as internal)
-            if (allTabs.length <= 1) {
-              return { content: [{ type: "text", text: "Cannot close - this is the only browsing tab. Comet needs at least one external tab open." }], isError: true };
-            }
-
             if (tabId) {
+              const tabs = await cometClient.getTabContexts();
+              const tab = tabs.find(t => t.id === tabId);
+              if (tab?.purpose === 'main') {
+                return { content: [{ type: "text", text: "Cannot close main Perplexity tab" }], isError: true };
+              }
               const success = await cometClient.closeTab(tabId);
               return { content: [{ type: "text", text: success ? `Closed tab: ${tabId}` : `Failed to close tab` }] };
             }
