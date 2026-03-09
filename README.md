@@ -380,6 +380,8 @@ export COMET_PATH=/custom/path/to/Comet.app/Contents/MacOS/Comet
 comet_ask prompt="..." timeout=180000
 ```
 
+**Important:** Treat the MCP as a sequential session controller. Do not launch multiple `comet_ask` calls in parallel against the same Comet browser session. Run one task at a time, wait for it to finish, then start the next task.
+
 ---
 
 **Problem:** Local source changes do not show up in MCP behavior
@@ -507,6 +509,7 @@ Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before
 2. Add tests for new features
 3. Update documentation for API changes
 4. Follow existing code style
+5. Validate runtime changes sequentially unless the MCP explicitly adds multi-task session isolation
 
 ---
 

@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - Updated developer documentation to use `pnpm` for local install/build/test commands.
 - Documented that local MCP clients configured to run `dist/index.js` must rebuild and restart the MCP child process after source changes before validating behavior.
+- Documented that the current MCP runtime should be used sequentially: one `comet_ask` at a time per Comet browser session.
 
 ### In Progress
 
