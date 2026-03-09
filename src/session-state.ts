@@ -8,6 +8,10 @@ export interface SessionState {
   lastPrompt: string | null;
   lastResponse: string | null;
   lastResponseTime: number | null;
+  /** How the task ended. `null` while in progress. */
+  lastTerminalStatus: "completed" | "blocked" | null;
+  /** Reason a task was blocked (e.g. login wall). `null` for non-blocked outcomes. */
+  lastBlockedReason: string | null;
   steps: string[];
   isActive: boolean;
 }
@@ -18,6 +22,8 @@ export const sessionState: SessionState = {
   lastPrompt: null,
   lastResponse: null,
   lastResponseTime: null,
+  lastTerminalStatus: null,
+  lastBlockedReason: null,
   steps: [],
   isActive: false,
 };
@@ -33,15 +39,23 @@ export function startNewTask(prompt: string): string {
   sessionState.lastPrompt = prompt;
   sessionState.lastResponse = null;
   sessionState.lastResponseTime = null;
+  sessionState.lastTerminalStatus = null;
+  sessionState.lastBlockedReason = null;
   sessionState.steps = [];
   sessionState.isActive = true;
   cometAI.resetStabilityTracking();
   return taskId;
 }
 
-export function completeTask(response: string): void {
+export function completeTask(
+  response: string,
+  terminalStatus: "completed" | "blocked" = "completed",
+  blockedReason: string | null = null,
+): void {
   sessionState.lastResponse = response;
   sessionState.lastResponseTime = Date.now();
+  sessionState.lastTerminalStatus = terminalStatus;
+  sessionState.lastBlockedReason = blockedReason;
   sessionState.isActive = false;
 }
 

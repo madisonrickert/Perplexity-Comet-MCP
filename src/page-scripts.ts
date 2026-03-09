@@ -26,11 +26,17 @@ export function readProseState(): ProseState {
 }
 
 export interface AgentStatusResult {
-  status: "idle" | "working" | "completed";
+  status: "idle" | "working" | "completed" | "blocked";
   steps: string[];
   currentStep: string;
   response: string;
   hasStopButton: boolean;
+  /** Reason browser automation is blocked, e.g. "login_required". `undefined` if unblocked. */
+  blockedReason?: "login_required";
+  /** Human-readable explanation of the blocked state. `undefined` if unblocked. */
+  blockedMessage?: string;
+  /** False when Comet's browser automation is unavailable (logged out, etc.). */
+  browserAutomationAvailable: boolean;
 }
 
 export function extractAgentStatus(): AgentStatusResult {
@@ -100,6 +106,36 @@ export function extractAgentStatus(): AgentStatusResult {
   const hasSourcesIndicator = /\d+\s*sources?/i.test(body); // "10 sources" etc
   const hasAskFollowUp = body.includes("Ask a follow-up") || body.includes("Ask follow-up");
 
+  // Detect Comet's "logged out, can't browse" / login-wall states. These show
+  // up either as inline body text or as a visible login dialog. When detected,
+  // we return status='blocked' so the caller can surface a clear error
+  // instead of timing out.
+  const hasLoggedOutBrowserText = body.includes("Comet Assistant can't use the browser when logged out");
+  const hasUnlockCapabilitiesText = body.includes("Log in to unlock full capabilities");
+  const hasSignInAccountText = body.includes("Sign in or create an account");
+  const hasVisibleLoginDialog = [
+    ...document.querySelectorAll('[role="dialog"], [aria-modal="true"], dialog'),
+  ].some((el) => {
+    if (!(el instanceof HTMLElement) || el.offsetParent === null) return false;
+    const text = (el.textContent || "").toLowerCase();
+    return (
+      text.includes("sign in") ||
+      text.includes("log in") ||
+      text.includes("create an account") ||
+      text.includes("continue with google") ||
+      text.includes("continue with apple")
+    );
+  });
+  const browserAutomationBlocked =
+    hasLoggedOutBrowserText ||
+    ((hasUnlockCapabilitiesText || hasSignInAccountText) && hasVisibleLoginDialog);
+  const blockedReason: "login_required" | undefined = browserAutomationBlocked
+    ? "login_required"
+    : undefined;
+  const blockedMessage: string | undefined = browserAutomationBlocked
+    ? "Comet browser automation is unavailable because the browser is logged out. Sign in to unlock full capabilities."
+    : undefined;
+
   // Prose-content threshold lowered to >0 so short answers (e.g. "2 + 2 = 4.")
   // are detected. Sidebar/UI text is filtered out by prefix.
   const proseEls = [...document.querySelectorAll('[class*="prose"]')] as HTMLElement[];
@@ -123,12 +159,15 @@ export function extractAgentStatus(): AgentStatusResult {
   ];
   const hasWorkingText = workingPatterns.some((p) => body.includes(p));
 
-  // Status determination. AskFollowUp+Prose ranks above LoadingSpinner because
-  // a visible follow-up prompt with prose is a stronger completion signal than
-  // a stale spinner sitting somewhere on the page.
-  let status: "idle" | "working" | "completed" = "idle";
+  // Status determination. Blocked beats everything: if the browser is logged
+  // out, no other detection is meaningful. Otherwise AskFollowUp+Prose ranks
+  // above LoadingSpinner because a visible follow-up prompt with prose is a
+  // stronger completion signal than a stale spinner sitting somewhere on the page.
+  let status: "idle" | "working" | "completed" | "blocked" = "idle";
 
-  if (hasActiveStopButton) {
+  if (browserAutomationBlocked) {
+    status = "blocked";
+  } else if (hasActiveStopButton) {
     status = "working";
   } else if (hasAskFollowUp && hasProseContent) {
     status = "completed";
@@ -236,5 +275,8 @@ export function extractAgentStatus(): AgentStatusResult {
     currentStep: steps.length > 0 ? steps[steps.length - 1] : "",
     response: response.substring(0, 8000),
     hasStopButton: hasActiveStopButton,
+    blockedReason,
+    blockedMessage,
+    browserAutomationAvailable: !browserAutomationBlocked,
   };
 }

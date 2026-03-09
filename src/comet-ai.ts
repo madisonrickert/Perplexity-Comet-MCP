@@ -373,13 +373,16 @@ export class CometAI {
    * Get current agent status and progress (for polling)
    */
   async getAgentStatus(): Promise<{
-    status: "idle" | "working" | "completed";
+    status: "idle" | "working" | "completed" | "blocked";
     steps: string[];
     currentStep: string;
     response: string;
     hasStopButton: boolean;
     agentBrowsingUrl: string;
     isStable: boolean;
+    blockedReason?: "login_required";
+    blockedMessage?: string;
+    browserAutomationAvailable: boolean;
   }> {
     // Get browsing URL from agent's tab
     let agentBrowsingUrl = '';
@@ -400,7 +403,7 @@ export class CometAI {
     const isStable = this.isResponseStable(statusResult.response);
 
     // If response is stable and has content, override status to completed
-    if (isStable && statusResult.response.trim().length > 0 && !statusResult.hasStopButton) {
+    if (statusResult.status !== 'blocked' && isStable && statusResult.response.trim().length > 0 && !statusResult.hasStopButton) {
       statusResult.status = 'completed';
     }
 
