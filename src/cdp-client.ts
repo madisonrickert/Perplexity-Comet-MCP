@@ -4,7 +4,8 @@
 import CDP from "chrome-remote-interface";
 import { spawn, ChildProcess, execSync } from "child_process";
 import { platform } from "os";
-import { existsSync } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
+import { join } from "path";
 import type {
   CDPTarget,
   CDPVersion,
@@ -145,9 +146,38 @@ const COMET_PATH = getCometPath();
 const IS_WINDOWS = platform() === "win32" || IS_WSL;
 const DEFAULT_PORT = 9223;
 
+function getDefaultCometUserDataDir(): string {
+  const os = platform();
+
+  if (process.env.COMET_USER_DATA_DIR) {
+    return process.env.COMET_USER_DATA_DIR;
+  }
+
+  if (os === "darwin") {
+    return `${process.env.HOME}/Library/Application Support/Comet`;
+  }
+
+  if (os === "win32" || IS_WSL) {
+    return `${process.env.LOCALAPPDATA}\\Perplexity\\Comet\\User Data`;
+  }
+
+   return `${process.env.HOME}/.config/comet`;
+}
+
+export interface StartCometOptions {
+  allowRestart?: boolean;
+  userDataDir?: string;
+}
+
+export interface StartCometResult {
+  status: "connected" | "launched" | "running_no_debug_port";
+  message: string;
+}
+
 export class CometCDPClient {
   private client: CDP.Client | null = null;
   private cometProcess: ChildProcess | null = null;
+  private preferredUserDataDir: string = getDefaultCometUserDataDir();
   private state: CometState = {
     connected: false,
     port: DEFAULT_PORT,
@@ -297,7 +327,10 @@ export class CometCDPClient {
           // If reconnect fails, try fresh start
           if (this.reconnectAttempts < this.maxReconnectAttempts) {
             try {
-              await this.startComet(this.state.port);
+              const startResult = await this.startComet(this.state.port);
+              if (startResult.status === 'running_no_debug_port') {
+                throw new Error(startResult.message);
+              }
               await new Promise(r => setTimeout(r, 1500));
               const targets = await this.listTargets();
               const page = targets.find(t => t.type === 'page' && t.url.includes('perplexity'));
@@ -333,10 +366,17 @@ export class CometCDPClient {
       await this.getVersion();
     } catch {
       try {
-        await this.startComet(this.state.port);
+        const startResult = await this.startComet(this.state.port);
+        if (startResult.status === 'running_no_debug_port') {
+          throw new Error(startResult.message);
+        }
         await new Promise(resolve => setTimeout(resolve, 2000));
-      } catch {
-        throw new Error('Cannot connect to Comet. Ensure Comet is running with --remote-debugging-port=9222');
+      } catch (error) {
+        throw new Error(
+          error instanceof Error
+            ? error.message
+            : 'Cannot connect to Comet. Ensure Comet is running with remote debugging enabled.'
+        );
       }
     }
 
@@ -718,7 +758,9 @@ export class CometCDPClient {
   }
 
   /**
-   * Kill any running Comet process
+   * Kill any running Comet process.
+   * On macOS, uses graceful AppleScript quit so Comet can flush cookies before exit.
+   * Falls back to pkill if AppleScript fails.
    */
   private async killComet(): Promise<void> {
     return new Promise((resolve) => {
@@ -728,218 +770,177 @@ export class CometCDPClient {
         kill.on('close', () => setTimeout(resolve, 1000));
         kill.on('error', () => setTimeout(resolve, 1000));
       } else {
-        // macOS/Linux: use pkill
-        const kill = spawn('pkill', ['-f', 'Comet.app']);
-        kill.on('close', () => setTimeout(resolve, 1000));
-        kill.on('error', () => setTimeout(resolve, 1000));
+        // macOS: graceful quit via AppleScript lets Comet flush cookies cleanly
+        const quit = spawn('osascript', ['-e', 'tell application "Comet" to quit']);
+        quit.on('close', () => setTimeout(resolve, 3000));
+        quit.on('error', () => {
+          // Fallback to pkill if osascript is unavailable
+          const kill = spawn('pkill', ['-f', 'Comet.app']);
+          kill.on('close', () => setTimeout(resolve, 1000));
+          kill.on('error', () => setTimeout(resolve, 1000));
+        });
       }
     });
   }
 
   /**
-   * Start Comet browser with remote debugging enabled
+   * Patch the Chromium Preferences file to prevent cookie-clear-on-exit.
+   * Must be called AFTER Comet has fully quit and BEFORE the next launch,
+   * because Comet overwrites Preferences on quit.
    */
-  async startComet(port: number = DEFAULT_PORT): Promise<string> {
-    this.state.port = port;
+  private patchProfilePreferences(userDataDir: string): void {
+    const prefsPath = join(userDataDir, 'Default', 'Preferences');
+    if (!existsSync(prefsPath)) return;
+    try {
+      const prefs = JSON.parse(readFileSync(prefsPath, 'utf8'));
 
-    // On WSL, use HTTP via PowerShell (WebSocket doesn't work across WSL/Windows boundary)
-    if (IS_WSL) {
-      // Check if Comet is already running with debug port via HTTP
-      try {
-        const response = await windowsFetch(`http://127.0.0.1:${port}/json/version`);
-        if (response.ok) {
-          const version = await response.json() as CDPVersion;
-          return `Comet already running on Windows host, port: ${port} (${version.Browser})`;
-        }
-      } catch {
-        // Comet not accessible, need to launch
+      // Allow sign-in so Chromium doesn't treat this as an unsigned-in profile
+      prefs.signin = prefs.signin ?? {};
+      prefs.signin.allowed = true;
+      // Disable the "clear cookies on exit for non-browser-signed-in profiles" migration
+      prefs.signin.cookie_clear_on_exit_migration_notice_complete = false;
+
+      // Disable browser-level clear-on-exit
+      prefs.browser = prefs.browser ?? {};
+      prefs.browser.clear_data_on_exit = false;
+
+      // Mark previous session as clean so crash-recovery cleanup doesn't run
+      prefs.profile = prefs.profile ?? {};
+      prefs.profile.exit_type = 'Normal';
+      prefs.profile.exited_cleanly = true;
+
+      writeFileSync(prefsPath, JSON.stringify(prefs));
+    } catch {
+      // Non-fatal — don't block Comet launch if Preferences can't be patched
+    }
+  }
+
+  private async isDebugPortReady(port: number): Promise<boolean> {
+    try {
+      if (IS_WINDOWS) {
+        const testClient = await Promise.race([
+          CDP({ port, host: '127.0.0.1' }),
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('cdp_timeout')), 2000)),
+        ]);
+        await testClient.close();
+        return true;
       }
 
-      // Try to launch Comet via PowerShell on Windows
-      console.error('Comet not accessible, attempting to launch via PowerShell...');
+      const response = await Promise.race([
+        windowsFetch(`http://127.0.0.1:${port}/json/version`),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('http_timeout')), 2000)),
+      ]);
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
 
-      // Get Windows user's LOCALAPPDATA path
+  private async waitForDebugPort(port: number, userDataDir: string): Promise<void> {
+    const maxAttempts = 40;
+    let attempts = 0;
+
+    while (attempts < maxAttempts) {
+      attempts++;
+      if (await this.isDebugPortReady(port)) {
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, attempts === 1 ? 1500 : 500));
+    }
+
+    const hint = IS_WINDOWS
+      ? `Try running: "${COMET_PATH}" --remote-debugging-port=${port} --user-data-dir="${userDataDir}"`
+      : `Try: ${COMET_PATH} --remote-debugging-port=${port} --user-data-dir="${userDataDir}"`;
+    throw new Error(`Timeout waiting for Comet debug port. ${hint}`);
+  }
+
+  private async launchCometWithDebug(port: number, launchArgs: string[], userDataDir: string): Promise<StartCometResult> {
+    if (IS_WSL) {
       let cometPath = '';
       try {
         const localAppData = execSync('cmd.exe /c echo %LOCALAPPDATA%', { encoding: 'utf8' }).trim().replace(/\r?\n/g, '');
         cometPath = `${localAppData}\\Perplexity\\Comet\\Application\\Comet.exe`;
-      } catch {
-        cometPath = 'C:\\Users\\' + (process.env.USER || 'user') + '\\AppData\\Local\\Perplexity\\Comet\\Application\\Comet.exe';
-      }
-
-      try {
-        // Launch Comet via PowerShell
-        // Use Set-Location to avoid UNC path issues when running from WSL
-        const psCommand = `Set-Location C:\\; Start-Process -FilePath '${cometPath}' -ArgumentList '--remote-debugging-port=${port}'`;
-        spawn('powershell.exe', ['-NoProfile', '-Command', psCommand], {
-          detached: true,
-          stdio: 'ignore',
-        }).unref();
-
-        // Wait for Comet to start - use HTTP check via PowerShell
-        return new Promise((resolve, reject) => {
-          const maxAttempts = 40;
-          let attempts = 0;
-
-          const checkReady = async () => {
-            attempts++;
-            try {
-              const response = await windowsFetch(`http://127.0.0.1:${port}/json/version`);
-              if (response.ok) {
-                resolve(`Comet started via WSL->PowerShell on port ${port}`);
-                return;
-              }
-            } catch { /* keep trying */ }
-
-            if (attempts < maxAttempts) {
-              setTimeout(checkReady, 500);
-            } else {
-              reject(new Error(
-                `Timeout waiting for Comet. Tried to launch: ${cometPath}\n` +
-                `Try manually: powershell.exe -Command "Start-Process '${cometPath}' -ArgumentList '--remote-debugging-port=${port}'"`
-              ));
-            }
-          };
-
-          setTimeout(checkReady, 2000);
-        });
-      } catch (launchError) {
-        throw new Error(
-          `Cannot connect to or launch Comet browser.\n` +
-          `Tried path: ${cometPath}\n` +
-          `Error: ${launchError instanceof Error ? launchError.message : String(launchError)}`
-        );
-      }
-    }
-
-    // On Windows (native), try direct WebSocket connection first (bypasses HTTP issues)
-    if (IS_WINDOWS) {
-      try {
-        // Try to connect directly via CDP WebSocket
-        const testClient = await CDP({ port, host: '127.0.0.1' });
-        await testClient.close();
-        return `Comet already running with debug port: ${port}`;
-      } catch {
-        // Comet not running or not accessible, check if process exists
-        const isRunning = await this.isCometProcessRunning();
-        if (!isRunning) {
-          // Start Comet
-          this.cometProcess = spawn(COMET_PATH, [`--remote-debugging-port=${port}`], {
-            detached: true,
-            stdio: "ignore",
-          });
-          this.cometProcess.unref();
-
-          // Wait for Comet to start and try WebSocket connection
-          return new Promise((resolve, reject) => {
-            const maxAttempts = 40;
-            let attempts = 0;
-
-            const checkReady = async () => {
-              attempts++;
-              try {
-                const testClient = await CDP({ port, host: '127.0.0.1' });
-                await testClient.close();
-                resolve(`Comet started with debug port ${port}`);
-                return;
-              } catch { /* keep trying */ }
-
-              if (attempts < maxAttempts) {
-                setTimeout(checkReady, 500);
-              } else {
-                reject(new Error(`Timeout waiting for Comet. Try running: "${COMET_PATH}" --remote-debugging-port=${port}`));
-              }
-            };
-
-            setTimeout(checkReady, 1500);
-          });
-        } else {
-          // Process running but CDP not accessible - need restart with debug port
-          await this.killComet();
-          await new Promise(r => setTimeout(r, 1000));
-
-          this.cometProcess = spawn(COMET_PATH, [`--remote-debugging-port=${port}`], {
-            detached: true,
-            stdio: "ignore",
-          });
-          this.cometProcess.unref();
-
-          return new Promise((resolve, reject) => {
-            const maxAttempts = 40;
-            let attempts = 0;
-
-            const checkReady = async () => {
-              attempts++;
-              try {
-                const testClient = await CDP({ port, host: '127.0.0.1' });
-                await testClient.close();
-                resolve(`Comet restarted with debug port ${port}`);
-                return;
-              } catch { /* keep trying */ }
-
-              if (attempts < maxAttempts) {
-                setTimeout(checkReady, 500);
-              } else {
-                reject(new Error(`Timeout waiting for Comet. Try running: "${COMET_PATH}" --remote-debugging-port=${port}`));
-              }
-            };
-
-            setTimeout(checkReady, 1500);
-          });
+        } catch {
+          cometPath = 'C:\\Users\\' + (process.env.USER || 'user') + '\\AppData\\Local\\Perplexity\\Comet\\Application\\Comet.exe';
         }
-      }
-    }
 
-    // Non-Windows: use original HTTP-based approach
-    try {
-      const response = await windowsFetch(`http://127.0.0.1:${port}/json/version`);
-
-      if (response.ok) {
-        const version = await response.json() as CDPVersion;
-        return `Comet already running with debug port: ${version.Browser}`;
-      }
-    } catch {
-      const isRunning = await this.isCometProcessRunning();
-      if (isRunning) {
-        await this.killComet();
-      }
-    }
-
-    // Start Comet
-    return new Promise((resolve, reject) => {
-      this.cometProcess = spawn(COMET_PATH, [`--remote-debugging-port=${port}`], {
+      const psArgs = launchArgs.map(arg => arg.includes(' ') ? `\"${arg}\"` : arg).join(' ');
+      const psCommand = `Set-Location C:\\; Start-Process -FilePath '${cometPath}' -ArgumentList '${psArgs}'`;
+      spawn('powershell.exe', ['-NoProfile', '-Command', psCommand], {
         detached: true,
-        stdio: "ignore",
+        stdio: 'ignore',
+      }).unref();
+
+      await this.waitForDebugPort(port, userDataDir);
+      return { status: 'launched', message: `Comet started via WSL->PowerShell on port ${port}` };
+    }
+
+    const LAUNCHD_LABEL = 'ai.perplexity.comet-debug';
+    const launchdPlist = `${process.env.HOME}/Library/LaunchAgents/${LAUNCHD_LABEL}.plist`;
+    const launchdAvailable = !IS_WINDOWS && existsSync(launchdPlist);
+
+    if (launchdAvailable) {
+      spawn('launchctl', ['start', LAUNCHD_LABEL], { detached: true, stdio: 'ignore' }).unref();
+    } else {
+      this.cometProcess = spawn(COMET_PATH, launchArgs, {
+        detached: true,
+        stdio: 'ignore',
       });
       this.cometProcess.unref();
+    }
 
-      const maxAttempts = 40;
-      let attempts = 0;
+    await this.waitForDebugPort(port, userDataDir);
+    return { status: 'launched', message: `Comet started with debug port ${port}` };
+  }
 
-      const checkReady = async () => {
-        attempts++;
-        try {
-          const response = await windowsFetch(`http://127.0.0.1:${port}/json/version`);
+  /**
+   * Start Comet browser with remote debugging enabled
+   */
+  async startComet(port: number = DEFAULT_PORT, options: StartCometOptions = {}): Promise<StartCometResult> {
+    const allowRestart = options.allowRestart ?? false;
+    const userDataDir = options.userDataDir ?? this.preferredUserDataDir;
+    const launchArgs = [
+      `--remote-debugging-port=${port}`,
+      `--user-data-dir=${userDataDir}`,
+      `--remote-allow-origins=*`,
+    ];
+    this.state.port = port;
+    this.preferredUserDataDir = userDataDir;
 
-          if (response.ok) {
-            const version = await response.json() as CDPVersion;
-            resolve(`Comet started with debug port ${port}: ${version.Browser}`);
-            return;
-          }
-        } catch { /* keep trying */ }
+    if (await this.isDebugPortReady(port)) {
+      try {
+        const version = await this.getVersion();
+        return {
+          status: 'connected',
+          message: `Comet already running with debug port ${port} (${version.Browser})`,
+        };
+      } catch {
+        return {
+          status: 'connected',
+          message: `Comet already running with debug port ${port}`,
+        };
+      }
+    }
 
-        if (attempts < maxAttempts) {
-          setTimeout(checkReady, 500);
-        } else {
-          const hint = IS_WINDOWS
-            ? `Try running: "${COMET_PATH}" --remote-debugging-port=${port}`
-            : `Try: ${COMET_PATH} --remote-debugging-port=${port}`;
-          reject(new Error(`Timeout waiting for Comet. ${hint}`));
-        }
+    const isRunning = await this.isCometProcessRunning();
+    if (isRunning && !allowRestart) {
+      return {
+        status: 'running_no_debug_port',
+        message:
+          `Comet is already running but not exposing debug port ${port}. ` +
+          `To attach MCP control, restart it with debugging enabled by calling comet_connect with allowRestart=true. ` +
+          `The restart path will use the profile at ${userDataDir}.`,
       };
+    }
 
-      setTimeout(checkReady, 1500);
-    });
+    if (isRunning) {
+      await this.killComet();
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+
+    this.patchProfilePreferences(userDataDir);
+
+    return this.launchCometWithDebug(port, launchArgs, userDataDir);
   }
 
   /**
@@ -1009,21 +1010,6 @@ export class CometCDPClient {
       this.client.DOM.enable(),
       this.client.Network.enable(),
     ]);
-
-    // Set window size for consistent UI
-    try {
-      const { windowId } = await (this.client as any).Browser.getWindowForTarget({ targetId });
-      await (this.client as any).Browser.setWindowBounds({
-        windowId,
-        bounds: { width: 1440, height: 900, windowState: 'normal' },
-      });
-    } catch {
-      try {
-        await (this.client as any).Emulation.setDeviceMetricsOverride({
-          width: 1440, height: 900, deviceScaleFactor: 1, mobile: false,
-        });
-      } catch { /* continue */ }
-    }
 
     this.state.connected = true;
     this.state.activeTabId = targetId;

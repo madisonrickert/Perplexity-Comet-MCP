@@ -116,19 +116,27 @@ Add to your Claude Code MCP settings (`~/.claude/settings.json` or VS Code setti
 
 ### comet_connect
 
-Establish connection to Comet browser. Auto-launches if not running.
+Establish connection to Comet browser. Auto-launches if not running. If Comet is already running without a debug port, it reports that state instead of silently restarting the existing browser session.
 
 ```
-Parameters: None
+Parameters:
+  - allowRestart (optional): If true, allows MCP to restart a running non-debug Comet instance so it can attach
+  - userDataDir (optional): Persistent profile directory to use when launching a debuggable Comet instance
+
 Returns: Connection status message
 ```
 
 **Example:**
 ```
 > comet_connect
+Comet is already running but not exposing debug port 9223. To attach MCP control, restart it with debugging enabled by calling comet_connect with allowRestart=true. The restart path will use the persistent debug profile at /Users/you/Library/Application Support/Comet Remote Debug.
+
+> comet_connect allowRestart=true
 Comet started with debug port 9223
-Connected to Perplexity (cleaned 2 old tabs)
+Connected to Perplexity
 ```
+
+When MCP launches a debuggable Comet instance, it uses your main Comet profile by default (`~/Library/Application Support/Comet` on macOS). On macOS, use the launchd setup described in the Troubleshooting section below to ensure your login session persists across restarts.
 
 ---
 
@@ -141,9 +149,12 @@ Parameters:
   - prompt (required): Question or task for Comet
   - newChat (optional): Start fresh conversation (default: false)
   - timeout (optional): Max wait time in ms (default: 120000)
+  - tabPolicy (optional): Browsing-tab cleanup policy: `preserve` (default), `cleanup`, or `cleanup_on_blocked`
 
 Returns: Complete response text
 ```
+
+`tabPolicy` only affects external browsing tabs opened during the current ask. The temporary Perplexity tab used by `newChat: true` is still cleaned up automatically. The default is `preserve`, which is safer for long-running agentic tasks that may still be using their browsing tabs when the ask returns or times out.
 
 **Examples:**
 
@@ -156,6 +167,9 @@ Returns: Complete response text
 
 # Site-specific data extraction
 > comet_ask "Check the price of iPhone 15 on amazon.com"
+
+# Clean up browsing tabs only if the task ends blocked
+> comet_ask "Go to example.com and tell me the page title" --tabPolicy cleanup_on_blocked
 ```
 
 ---
@@ -346,6 +360,7 @@ File uploaded successfully: /home/user/doc.pdf
 |----------|-------------|---------|
 | `COMET_PATH` | Custom path to Comet executable | Auto-detected |
 | `COMET_PORT` | CDP debugging port | 9223 |
+| `COMET_USER_DATA_DIR` | Persistent profile directory used when MCP launches Comet | Main Comet profile (`~/Library/Application Support/Comet` on macOS) |
 
 ### Custom Comet Path
 
@@ -367,8 +382,66 @@ export COMET_PATH=/custom/path/to/Comet.app/Contents/MacOS/Comet
 
 **Solutions:**
 1. Ensure Comet browser is installed
-2. Close any existing Comet instances
-3. Run `comet_connect` to auto-start with correct flags
+2. If Comet is already open normally, run `comet_connect` first and read the returned state before restarting anything
+3. Run `comet_connect allowRestart=true` only when you explicitly want MCP to relaunch Comet with remote debugging enabled
+
+---
+
+**Problem:** `Comet is already running but not exposing debug port 9223`
+
+**Explanation:** MCP detected a normal Comet session and refused to restart it automatically. This is intentional because restarting the browser can discard the manual session you were using.
+
+**Solution:**
+1. If you only want to preserve the current browser session, close Comet yourself and run `comet_connect`
+2. If you want MCP to relaunch a debuggable session for you, call `comet_connect allowRestart=true`
+3. If you need that debuggable session to keep its own login state, provide a stable `userDataDir` or set `COMET_USER_DATA_DIR`
+
+---
+
+**Problem:** Comet launches but shows the login page — session does not persist across MCP restarts (macOS)
+
+**Explanation:** This is a macOS Keychain access issue. When a Node.js MCP process spawns Comet directly (`child_process.spawn`), macOS treats the child as a non-interactive background process and blocks Keychain access with `errSecInteractionNotAllowed`. Comet (Chromium) uses the Keychain to store and retrieve the AES-256-GCM key that encrypts all cookies (`"Comet Safe Storage"`). When that Keychain lookup fails, Chromium silently skips cookie decryption — so your `__Secure-next-auth.session-token` exists in the SQLite cookie store but is invisible to the browser. Perplexity never sees the token and redirects to login.
+
+You can confirm this is your issue by capturing Comet's stderr while launched directly by Node: it will contain `keychain_password_mac.mm: Keychain lookup failed: errKCInteractionNotAllowed`.
+
+**Solution:** Install the bundled launchd LaunchAgent so macOS launches Comet as a proper user-session process with full Keychain access. This is a one-time setup.
+
+1. Create `~/Library/LaunchAgents/ai.perplexity.comet-debug.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.perplexity.comet-debug</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Applications/Comet.app/Contents/MacOS/Comet</string>
+    <string>--remote-debugging-port=9223</string>
+    <string>--user-data-dir=/Users/YOUR_USERNAME/Library/Application Support/Comet</string>
+    <string>--remote-allow-origins=*</string>
+  </array>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+</dict>
+</plist>
+```
+
+Replace `YOUR_USERNAME` with your macOS username. The `--user-data-dir` must point to your real Comet profile so your login persists.
+
+2. Load the agent:
+
+```bash
+launchctl load ~/Library/LaunchAgents/ai.perplexity.comet-debug.plist
+```
+
+Once the plist exists and is loaded, the MCP automatically uses `launchctl start ai.perplexity.comet-debug` instead of spawning Comet directly. This gives the process full Keychain access, so cookie encryption/decryption works normally and your session survives restarts.
+
+**Why `--password-store=basic` doesn't help:** That flag exists only on Linux (for GNOME Keyring / KWallet fallback). On macOS, Chromium's OSCrypt has only the Keychain path — there is no alternative store in production builds.
 
 ---
 
@@ -454,6 +527,12 @@ wsl --shutdown
 **Problem:** `Cannot close - this is the only browsing tab`
 
 **Explanation:** This is intentional protection. Comet requires at least one external tab. Open another tab first, then close the unwanted one.
+
+---
+
+## Testing
+
+A full test battery covering all 8 tools across 9 groups (35 tests) is maintained in [`docs/testing.md`](docs/testing.md).
 
 ---
 

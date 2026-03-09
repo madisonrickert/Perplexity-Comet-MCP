@@ -9,11 +9,13 @@ All notable changes to this project will be documented in this file.
 - Updated developer documentation to use `pnpm` for local install/build/test commands.
 - Documented that local MCP clients configured to run `dist/index.js` must rebuild and restart the MCP child process after source changes before validating behavior.
 - Documented that the current MCP runtime should be used sequentially: one `comet_ask` at a time per Comet browser session.
+- Added `tabPolicy` to `comet_ask` so browsing-tab cleanup is explicit (`preserve`, `cleanup`, or `cleanup_on_blocked`) instead of always happening automatically.
+- `comet_connect` now requires explicit opt-in before restarting a running non-debug Comet session, and it accepts `allowRestart` and `userDataDir` launch options.
+- Debuggable Comet launches now default to a dedicated persistent remote-debug profile instead of the normal Comet default profile.
 
 ### Fixed
 
 - `comet_ask` now returns an explicit blocked state when browser-required prompts hit Comet's logged-out browser-capability warning instead of silently treating assistant text as a successful browser action.
-- Blocked browser tasks now clean up any external browsing tabs opened during the task instead of leaving lingering agent-browsing tabs behind.
 
 ## [2.6.2] - 2026-01-11
 

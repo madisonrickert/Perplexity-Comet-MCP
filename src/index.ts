@@ -25,21 +25,38 @@ const TOOLS: Tool[] = [
   {
     name: "comet_connect",
     description: "Connect to Comet browser (auto-starts if needed)",
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: {
+      type: "object",
+      properties: {
+        allowRestart: {
+          type: "boolean",
+          description: "If true, allows Comet to be restarted when it is already running without a debug port. Default: false.",
+        },
+        userDataDir: {
+          type: "string",
+          description: "Optional persistent user data directory to use when launching a debuggable Comet profile.",
+        },
+      },
+    },
   },
   {
     name: "comet_ask",
     description: "Send a prompt to Comet/Perplexity and wait for the complete response (blocking). Ideal for tasks requiring real browser interaction (login walls, dynamic content, filling forms) or deep research with agentic browsing.",
     inputSchema: {
       type: "object",
-      properties: {
-        prompt: { type: "string", description: "Question or task for Comet - focus on goals and context" },
-        context: { type: "string", description: "Optional context to include (e.g., file contents, codebase info, marketing guidelines). This will be prefixed to the prompt to give Comet full context." },
-        newChat: { type: "boolean", description: "Start a fresh conversation (default: false)" },
-        timeout: { type: "number", description: "Max wait time in ms (default: 120000 = 2min)" },
+        properties: {
+          prompt: { type: "string", description: "Question or task for Comet - focus on goals and context" },
+          context: { type: "string", description: "Optional context to include (e.g., file contents, codebase info, marketing guidelines). This will be prefixed to the prompt to give Comet full context." },
+          newChat: { type: "boolean", description: "Start a fresh conversation (default: false)" },
+          timeout: { type: "number", description: "Max wait time in ms (default: 120000 = 2min)" },
+          tabPolicy: {
+            type: "string",
+            enum: ["preserve", "cleanup", "cleanup_on_blocked"],
+            description: "How to handle browsing tabs opened during this ask. 'preserve' keeps them, 'cleanup' closes them on exit, and 'cleanup_on_blocked' closes them only if the task ends blocked. Default: preserve.",
+          },
+        },
+        required: ["prompt"],
       },
-      required: ["prompt"],
-    },
   },
   {
     name: "comet_poll",
@@ -129,8 +146,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case "comet_connect": {
-        // Auto-start Comet with debug port (will restart if running without it)
-        const startResult = await cometClient.startComet(9223);
+        const allowRestart = (args?.allowRestart as boolean) ?? false;
+        const userDataDir = args?.userDataDir as string | undefined;
+        const startResult = await cometClient.startComet(9223, { allowRestart, userDataDir });
+
+        if (startResult.status === 'running_no_debug_port') {
+          return {
+            content: [{ type: "text", text: startResult.message }],
+            isError: true,
+          };
+        }
 
         // Get all tabs - DON'T clean up tabs, as closing them can crash Comet
         const targets = await cometClient.listTargets();
@@ -149,14 +174,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             await new Promise(resolve => setTimeout(resolve, 1500));
           }
 
-          return { content: [{ type: "text", text: `${startResult}\nConnected to Perplexity` }] };
+          return { content: [{ type: "text", text: `${startResult.message}\nConnected to Perplexity` }] };
         }
 
         // No tabs at all - create a new one
         const newTab = await cometClient.newTab("https://www.perplexity.ai/");
         await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for page load
         await cometClient.connect(newTab.id);
-        return { content: [{ type: "text", text: `${startResult}\nCreated new tab and navigated to Perplexity` }] };
+        return { content: [{ type: "text", text: `${startResult.message}\nCreated new tab and navigated to Perplexity` }] };
       }
 
       case "comet_ask": {
@@ -164,6 +189,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const context = args?.context as string | undefined;
         const maxTimeout = (args?.timeout as number) || 120000; // Max 2 minutes safety net
         const newChat = (args?.newChat as boolean) || false;
+        const tabPolicy = ((args?.tabPolicy as string) || 'preserve') as 'preserve' | 'cleanup' | 'cleanup_on_blocked';
 
         // Validate prompt
         if (!prompt || prompt.trim().length === 0) {
@@ -186,12 +212,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } catch (preCheckError) {
           // If pre-check fails, try to recover
           try {
-            await cometClient.startComet(9223);
+            const startResult = await cometClient.startComet(9223);
+            if (startResult.status === 'running_no_debug_port') {
+              return {
+                content: [{
+                  type: "text",
+                  text: `Error: ${startResult.message}`,
+                }],
+                isError: true,
+              };
+            }
             const targets = await cometClient.listTargets();
             const page = targets.find(t => t.type === 'page');
             if (page) await cometClient.connect(page.id);
-          } catch {
-            return { content: [{ type: "text", text: "Error: Failed to establish connection to Comet browser" }] };
+          } catch (error) {
+            return {
+              content: [{
+                type: "text",
+                text: `Error: ${error instanceof Error ? error.message : 'Failed to establish connection to Comet browser'}`,
+              }],
+              isError: true,
+            };
           }
         }
 
@@ -235,6 +276,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             .filter(tab => tab.purpose !== 'main')
             .map(tab => tab.id)
         );
+        let blockedReason: string | null = null;
+        let blockedMessage: string | null = null;
 
         if (newChat) {
           await cometClient.ensureConnection();
@@ -268,7 +311,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         const closeNewExternalTabs = async () => {
-          if (!needsAgenticBrowsing) {
+          if (!needsAgenticBrowsing || tabPolicy === 'preserve') {
+            return;
+          }
+
+          if (tabPolicy === 'cleanup_on_blocked' && !blockedReason) {
             return;
           }
 
@@ -311,8 +358,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const MAX_CONSECUTIVE_ERRORS = 5;
           let lastKnownResponse = '';
           let lastKnownHasStopButton = true;
-          let blockedReason: string | null = null;
-          let blockedMessage: string | null = null;
           let statusPollInFlight: Promise<Awaited<ReturnType<typeof cometAI.getAgentStatus>>> | null = null;
 
           const formatBlockedMessage = (partialResponse?: string) => {
