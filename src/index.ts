@@ -271,6 +271,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         let newChatTabId: string | null = null;
+
+        // Close any agent-browsing tabs left over from prior sessions before
+        // snapshotting the baseline, so they don't get frozen into it.
+        const allTabsNow = await cometClient.getTabContexts();
+        for (const tab of allTabsNow) {
+          if (tab.purpose === 'agent-browsing') {
+            await cometClient.closeTab(tab.id).catch(() => {});
+          }
+        }
+
         const baselineExternalTabIds = new Set(
           (await cometClient.getTabContexts())
             .filter(tab => tab.purpose !== 'main')
@@ -646,7 +656,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         ]);
 
         if (!switched) {
-          let output = `Status: ${sessionState.isActive ? 'WORKING' : 'UNKNOWN'}\n`;
+          const elapsedSec = sessionState.taskStartTime ? Math.round((Date.now() - sessionState.taskStartTime) / 1000) : null;
+          let output = `Status: ${sessionState.isActive ? 'WORKING' : 'UNKNOWN'}${elapsedSec !== null ? ` (${elapsedSec}s elapsed)` : ''}\n`;
           if (sessionState.currentTaskId) {
             output += `Task: ${sessionState.currentTaskId}\n`;
           }
@@ -698,7 +709,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         // Still working - return progress info
-        let output = `Status: ${status.status.toUpperCase()}\n`;
+        const elapsedSec = sessionState.taskStartTime ? Math.round((Date.now() - sessionState.taskStartTime) / 1000) : null;
+        let output = `Status: ${status.status.toUpperCase()}${elapsedSec !== null ? ` (${elapsedSec}s elapsed)` : ''}\n`;
         if (sessionState.currentTaskId) {
           output += `Task: ${sessionState.currentTaskId}\n`;
         }
@@ -805,6 +817,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "comet_mode": {
         const mode = args?.mode as string | undefined;
+
+        await cometClient.ensureOnPerplexityTab();
+
+        const blockState = await cometAI.getBrowserBlockState();
+        if (blockState.blocked) {
+          return { content: [{ type: "text", text: blockState.blockedMessage ?? 'Comet is blocked. Check login status.' }], isError: true };
+        }
 
         // If no mode provided, show current mode
         if (!mode) {

@@ -31,7 +31,7 @@ export class CometAI {
 
   async getBrowserBlockState(): Promise<{
     blocked: boolean;
-    blockedReason?: "login_required";
+    blockedReason?: "login_required" | "quota_exceeded";
     blockedMessage?: string;
   }> {
     const result = await this.client.safeEvaluate(`
@@ -50,22 +50,37 @@ export class CometAI {
             text.includes('continue with apple');
         });
 
-        const blocked = hasLoggedOutBrowserText ||
+        const loginBlocked = hasLoggedOutBrowserText ||
           ((hasUnlockCapabilitiesText || hasSignInAccountText) && hasVisibleLoginDialog);
 
-        return {
-          blocked,
-          blockedReason: blocked ? 'login_required' : undefined,
-          blockedMessage: blocked
-            ? 'Comet browser automation is unavailable because the browser is logged out. Sign in to unlock full capabilities.'
-            : undefined,
-        };
+        const hasUpgradePlan = [...document.querySelectorAll('button, span, a')].some(el => {
+          const t = (el.textContent || '').trim();
+          return t === 'Upgrade plan' || t === 'Upgrade to Pro';
+        });
+        const inputMissing = !document.querySelector('[role="textbox"], [contenteditable], textarea');
+        const quotaExceeded = hasUpgradePlan && inputMissing;
+
+        if (loginBlocked) {
+          return {
+            blocked: true,
+            blockedReason: 'login_required',
+            blockedMessage: 'Comet browser automation is unavailable because the browser is logged out. Sign in to unlock full capabilities.',
+          };
+        }
+        if (quotaExceeded) {
+          return {
+            blocked: true,
+            blockedReason: 'quota_exceeded',
+            blockedMessage: 'Perplexity Pro quota has been reached. Agentic features are unavailable until the quota resets.',
+          };
+        }
+        return { blocked: false };
       })()
     `);
 
     return (result.result.value as {
       blocked: boolean;
-      blockedReason?: "login_required";
+      blockedReason?: "login_required" | "quota_exceeded";
       blockedMessage?: string;
     }) ?? { blocked: false };
   }
