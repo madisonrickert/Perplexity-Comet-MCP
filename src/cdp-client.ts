@@ -1316,6 +1316,84 @@ export class CometCDPClient {
   }
 
   /**
+   * Bound `promise` against a client-side deadline. If `ms` elapses first,
+   * rejects with TimedOutError(op, ms). Also registers the rejector with the
+   * connection liveness layer so a heartbeat-detected disconnect can fail
+   * the call with DisconnectedError instead of leaving it pending.
+   *
+   * Note: chrome-remote-interface has no public cancellation API, so the
+   * underlying CDP request stays in its response queue until it resolves
+   * naturally. Use this only for cheap CDP methods; prefer the server-side
+   * `timeout:` parameter on Runtime.evaluate / Runtime.callFunctionOn (see
+   * evaluateBounded) when available.
+   */
+  private withTimeout<T>(promise: Promise<T>, ms: number, op: string): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const cleanup = () => {
+        this.inFlightRejects.delete(reject);
+        clearTimeout(timer);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new TimedOutError(op, ms));
+      }, ms);
+      this.inFlightRejects.add(reject);
+      promise.then(
+        (v) => { cleanup(); resolve(v); },
+        (e) => { cleanup(); reject(e); },
+      );
+    });
+  }
+
+  /**
+   * Bounded Runtime.evaluate. Uses CDP's server-side `timeout:` param so the
+   * page-side script is actually terminated, not just abandoned.
+   */
+  async evaluateBounded(expression: string, timeoutMs: number): Promise<EvaluateResult> {
+    return this.withAutoReconnect(async () => {
+      this.ensureConnected();
+      // The chrome-remote-interface call still queues a response listener,
+      // so we also wrap in withTimeout to register with the liveness layer
+      // — that way a disconnect during a long evaluate fails fast.
+      return this.withTimeout(
+        this.client!.Runtime.evaluate({
+          expression,
+          awaitPromise: true,
+          returnByValue: true,
+          timeout: timeoutMs,
+        }) as Promise<EvaluateResult>,
+        timeoutMs + 500, // slack so server-side timeout error reaches us first
+        'Runtime.evaluate',
+      );
+    });
+  }
+
+  /** Bounded Page.bringToFront. */
+  async bringToFrontBounded(timeoutMs: number): Promise<void> {
+    this.ensureConnected();
+    await this.withTimeout(
+      this.client!.Page.bringToFront() as Promise<unknown>,
+      timeoutMs,
+      'Page.bringToFront',
+    );
+  }
+
+  /** Bounded list of CDP targets. */
+  async listTargetsBounded(timeoutMs: number): Promise<CDPTarget[]> {
+    return this.withTimeout(this.listTargets(), timeoutMs, 'listTargets');
+  }
+
+  /** Bounded variant of isOnPerplexityTab. */
+  async isOnPerplexityTabBounded(timeoutMs: number): Promise<boolean> {
+    return this.withTimeout(this.isOnPerplexityTab(), timeoutMs, 'isOnPerplexityTab');
+  }
+
+  /** Bounded variant of ensureOnPerplexityTab. */
+  async ensureOnPerplexityTabBounded(timeoutMs: number): Promise<boolean> {
+    return this.withTimeout(this.ensureOnPerplexityTab(), timeoutMs, 'ensureOnPerplexityTab');
+  }
+
+  /**
    * Press a key
    */
   async pressKey(key: string): Promise<void> {
