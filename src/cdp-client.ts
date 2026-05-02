@@ -16,6 +16,30 @@ import type {
   TabContext,
 } from "./types.js";
 
+/**
+ * Thrown when an in-flight CDP call is rejected because the connection layer
+ * detected a dead WebSocket (heartbeat failure or unprompted disconnect) and
+ * dropped the in-flight queue. Caller should reconnect and retry.
+ */
+export class DisconnectedError extends Error {
+  constructor(message = "CDP connection lost") {
+    super(message);
+    this.name = "DisconnectedError";
+  }
+}
+
+/**
+ * Thrown by bounded CDP wrappers when a client-side timeout fires before the
+ * underlying call resolved. The op + ms fields are for logging; callers can
+ * `instanceof` check this error to decide whether to retry vs surface.
+ */
+export class TimedOutError extends Error {
+  constructor(public op: string, public ms: number) {
+    super(`CDP op '${op}' timed out after ${ms}ms`);
+    this.name = "TimedOutError";
+  }
+}
+
 // Detect if running in WSL (must be before windowsFetch)
 function isWSL(): boolean {
   if (platform() !== 'linux') return false;
