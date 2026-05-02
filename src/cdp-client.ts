@@ -15,6 +15,7 @@ import type {
   CometState,
   TabContext,
 } from "./types.js";
+import { HEARTBEAT_MS, HEARTBEAT_FAIL_MS } from "./cdp-timeouts.js";
 
 /**
  * Thrown when an in-flight CDP call is rejected because the connection layer
@@ -223,6 +224,15 @@ export class CometCDPClient {
   // ops can confirm the renderer has actually painted before they run.
   private frameLifecycle: Map<string, { loaderId: string; events: Set<string> }> = new Map();
   private lifecycleListener: ((params: any) => void) | null = null;
+
+  // Connection liveness — heartbeat interval + registry of in-flight bounded
+  // calls. When the heartbeat detects a dead WebSocket (or chrome-remote-
+  // interface fires its 'disconnect' event), we mark the client null, reject
+  // every registered caller with DisconnectedError, and let the next caller
+  // trigger reconnect. This is the same pattern Puppeteer/Playwright use for
+  // their CDP connections.
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private inFlightRejects: Set<(err: Error) => void> = new Set();
 
   get isConnected(): boolean {
     return this.state.connected && this.client !== null;
@@ -1065,10 +1075,67 @@ export class CometCDPClient {
     this.lastTargetId = targetId;
     this.reconnectAttempts = 0;
 
+    // chrome-remote-interface emits 'disconnect' when the WebSocket closes
+    // (target navigated away, browser killed, network drop). Hook it so we
+    // can fail in-flight bounded calls instead of leaving them pending.
+    try {
+      (this.client as any).on?.('disconnect', () => this.onConnectionLost('websocket disconnect'));
+    } catch { /* best-effort */ }
+
+    // Periodic heartbeat — Target.getTargetInfo is cheap and validates the
+    // WebSocket end-to-end. If it doesn't respond within HEARTBEAT_FAIL_MS,
+    // declare the connection dead.
+    this.startHeartbeat();
+
     const { result } = await this.client.Runtime.evaluate({ expression: "window.location.href" });
     this.state.currentUrl = result.value as string;
 
     return `Connected to tab: ${this.state.currentUrl}`;
+  }
+
+  private startHeartbeat(): void {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = setInterval(async () => {
+      const client = this.client;
+      if (!client) return;
+      try {
+        await Promise.race([
+          (client as any).Target.getTargetInfo({}),
+          new Promise<never>((_, reject) => setTimeout(
+            () => reject(new TimedOutError('heartbeat', HEARTBEAT_FAIL_MS)),
+            HEARTBEAT_FAIL_MS,
+          )),
+        ]);
+      } catch (e) {
+        this.onConnectionLost(`heartbeat: ${(e as Error).message}`);
+      }
+    }, HEARTBEAT_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  /**
+   * Mark the connection dead, fail every in-flight bounded caller with
+   * DisconnectedError, and let the next caller trigger reconnect via the
+   * existing withAutoReconnect path. Safe to call multiple times.
+   */
+  private onConnectionLost(reason: string): void {
+    if (!this.client && !this.state.connected) return;
+    this.stopHeartbeat();
+    this.client = null;
+    this.state.connected = false;
+    this.invalidateHealthCache();
+    const err = new DisconnectedError(`CDP connection lost: ${reason}`);
+    const rejects = [...this.inFlightRejects];
+    this.inFlightRejects.clear();
+    for (const reject of rejects) {
+      try { reject(err); } catch { /* ignore */ }
+    }
   }
 
   /**
@@ -1103,11 +1170,19 @@ export class CometCDPClient {
    * Disconnect from current tab
    */
   async disconnect(): Promise<void> {
+    this.stopHeartbeat();
     if (this.client) {
       await this.client.close();
       this.client = null;
       this.state.connected = false;
       this.state.activeTabId = undefined;
+    }
+    // Fail any in-flight bounded callers cleanly rather than leaving them
+    // pending against the closed client.
+    const rejects = [...this.inFlightRejects];
+    this.inFlightRejects.clear();
+    for (const reject of rejects) {
+      try { reject(new DisconnectedError("CDP disconnect()")); } catch { /* ignore */ }
     }
   }
 
