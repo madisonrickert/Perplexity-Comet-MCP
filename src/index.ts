@@ -11,7 +11,7 @@ import {
   ListToolsRequestSchema,
   Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { cometClient } from "./cdp-client.js";
+import { cometClient, DisconnectedError, TimedOutError } from "./cdp-client.js";
 import { cometAI } from "./comet-ai.js";
 import {
   sessionState,
@@ -20,6 +20,13 @@ import {
   isSessionStale,
 } from "./session-state.js";
 import { readProseState, type ProseState } from "./page-scripts.js";
+import {
+  EVAL_OP_MS,
+  SHORT_OP_MS,
+  STATUS_POLL_INTERVAL_MS,
+  RESPONSE_IDLE_MS,
+  RESPONSE_MIN_LEN,
+} from "./cdp-timeouts.js";
 
 const TOOLS: Tool[] = [
   {
@@ -362,13 +369,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           let sawNewResponse = newChat ? true : false;
           let lastActivityTime = Date.now();
           let previousResponse = '';
-          const POLL_INTERVAL = 600;
-          const IDLE_TIMEOUT = 3000;
           let consecutiveErrors = 0;
           const MAX_CONSECUTIVE_ERRORS = 5;
           let lastKnownResponse = '';
           let lastKnownHasStopButton = true;
-          let statusPollInFlight: Promise<Awaited<ReturnType<typeof cometAI.getAgentStatus>>> | null = null;
 
           const formatBlockedMessage = (partialResponse?: string) => {
             const blockedText = [
@@ -387,16 +391,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
 
           const detectBrowserBlocked = async () => {
-            if (!needsAgenticBrowsing) {
-              return false;
-            }
-
+            if (!needsAgenticBrowsing) return false;
             try {
-              const browserBlockState = await Promise.race([
-                cometAI.getBrowserBlockState(),
-                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('blocked_check_timeout')), 2000))
-              ]);
-
+              const browserBlockState = await cometAI.getBrowserBlockState();
               if (browserBlockState?.blocked) {
                 blockedReason = browserBlockState.blockedReason || 'login_required';
                 blockedMessage = browserBlockState.blockedMessage || 'Comet browser automation is unavailable because the browser is logged out. Sign in to unlock full capabilities.';
@@ -405,25 +402,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             } catch {
               return Boolean(blockedReason);
             }
-
             return false;
           };
 
           const settleSuccessResponse = async (response: string) => {
-            if (!needsAgenticBrowsing) {
-              return { blocked: false as const };
-            }
-
+            if (!needsAgenticBrowsing) return { blocked: false as const };
             const settleDeadline = Date.now() + 5000;
             while (Date.now() < settleDeadline) {
               await new Promise(resolve => setTimeout(resolve, 500));
-
               if (await detectBrowserBlocked()) {
                 const message = formatBlockedMessage(response || lastKnownResponse || undefined);
                 return { blocked: true as const, message };
               }
             }
-
             return { blocked: false as const };
           };
 
@@ -434,56 +425,48 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               completeTask(settled.message, 'blocked', blockedReason);
               return { content: [{ type: "text", text: settled.message }] };
             }
-
             completeTask(response);
             return { content: [{ type: "text", text: response }] };
           };
 
+          // The polling loop. Per-iteration:
+          //   1. ensure we're attached to a Perplexity tab (bounded)
+          //   2. probe current prose state (bounded server-side via evaluate timeout)
+          //   3. read agent status (bounded)
+          //   4. run completion / stability / idle checks
+          // Errors:
+          //   - DisconnectedError → reconnect once, continue
+          //   - TimedOutError → log via consecutiveErrors, continue
+          //   - other → bubble after MAX_CONSECUTIVE_ERRORS
+          // The 8000ms "safety net" exit is gone: status.isStable + idle-time
+          // exits handle every case it covered, without truncating short answers.
           while (Date.now() - startTime < maxTimeout) {
-            await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL));
+            await new Promise(resolve => setTimeout(resolve, STATUS_POLL_INTERVAL_MS));
 
-            const elapsed = Date.now() - startTime;
             if (needsAgenticBrowsing && blockedReason) {
               const message = formatBlockedMessage(lastKnownResponse || undefined);
               completeTask(message, 'blocked', blockedReason);
               return { content: [{ type: "text", text: message }] };
             }
 
-            if (elapsed > 8000 && lastKnownResponse.length > 0 && !lastKnownHasStopButton && !(needsAgenticBrowsing && blockedReason)) {
-              return await completeWithSettledResponse(lastKnownResponse);
-            }
-
             try {
-              const isOnPerplexity = await Promise.race([
-                cometClient.isOnPerplexityTab(),
-                new Promise<boolean>(resolve => setTimeout(() => resolve(true), 2000))
-              ]);
-              if (!isOnPerplexity) {
-                const switched = await Promise.race([
-                  cometClient.ensureOnPerplexityTab(),
-                  new Promise<boolean>(resolve => setTimeout(() => resolve(false), 3000))
-                ]);
-                if (!switched) {
+              if (!await cometClient.isOnPerplexityTabBounded(SHORT_OP_MS)) {
+                if (!await cometClient.ensureOnPerplexityTabBounded(SHORT_OP_MS)) {
                   consecutiveErrors++;
                   continue;
                 }
               }
 
-              const currentStateResult = await Promise.race([
-                cometClient.withAutoReconnect(async () => {
-                  return await cometClient.evaluate(`
-                    (() => {
-                      const proseEls = document.querySelectorAll('[class*="prose"]');
-                      const lastProse = proseEls[proseEls.length - 1];
-                      return {
-                        count: proseEls.length,
-                        lastText: lastProse ? lastProse.innerText.substring(0, 100) : ''
-                      };
-                    })()
-                  `);
-                }),
-                new Promise<never>((_, reject) => setTimeout(() => reject(new Error('state_timeout')), 3000))
-              ]);
+              const currentStateResult = await cometClient.evaluateBounded(`
+                (() => {
+                  const proseEls = document.querySelectorAll('[class*="prose"]');
+                  const lastProse = proseEls[proseEls.length - 1];
+                  return {
+                    count: proseEls.length,
+                    lastText: lastProse ? lastProse.innerText.substring(0, 100) : ''
+                  };
+                })()
+              `, EVAL_OP_MS);
               const currentState = currentStateResult.result.value as { count: number; lastText: string };
 
               if (!sawNewResponse) {
@@ -493,45 +476,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 }
               }
 
-              let status: Awaited<ReturnType<typeof cometAI.getAgentStatus>>;
-              try {
-                if (!statusPollInFlight) {
-                  statusPollInFlight = cometAI.getAgentStatus().finally(() => {
-                    statusPollInFlight = null;
-                  });
-                }
-
-                status = await Promise.race([
-                  statusPollInFlight,
-                  new Promise<never>((_, reject) => setTimeout(() => reject(new Error('status_timeout')), 4000))
-                ]);
-              } catch (statusError) {
-                if (String(statusError).includes('status_timeout')) {
-                  try {
-                    const directResult = await Promise.race([
-                      cometClient.evaluate(`
-                        (() => {
-                          const els = [...document.querySelectorAll('[class*="prose"]')];
-                          return els.map(e => e.innerText.trim()).filter(t => t.length > 20).join('\\n\\n');
-                        })()
-                      `),
-                      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('direct_timeout')), 1500))
-                    ]);
-                    const text = (directResult?.result?.value as string | undefined) || '';
-                    if (text && text.length > 0) {
-                      lastKnownResponse = text;
-                      lastKnownHasStopButton = false;
-                    }
-                    await detectBrowserBlocked();
-                  } catch { /* ignore */ }
-                  continue;
-                }
-                throw statusError;
-              }
-
+              const status = await cometAI.getAgentStatus();
               consecutiveErrors = 0;
 
-              if (status.response && status.response.length > 0) {
+              if (status.response && status.response.length >= RESPONSE_MIN_LEN) {
                 lastKnownResponse = status.response;
                 lastKnownHasStopButton = status.hasStopButton;
               }
@@ -567,34 +515,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               }
 
               const idleTime = Date.now() - lastActivityTime;
-              if (idleTime > IDLE_TIMEOUT && sawNewResponse && status.response &&
-                  status.response.length > 0 && !status.hasStopButton) {
+              if (idleTime > RESPONSE_IDLE_MS && sawNewResponse && status.response &&
+                  status.response.length >= RESPONSE_MIN_LEN && !status.hasStopButton) {
                 return await completeWithSettledResponse(status.response);
               }
 
-            } catch {
-              consecutiveErrors++;
-
-              try {
-                const recovered = await cometClient.ensureOnPerplexityTab();
-                if (recovered) {
-                  consecutiveErrors = Math.max(0, consecutiveErrors - 1);
-                  continue;
-                }
-              } catch {
-                /* empty */
+            } catch (e) {
+              if (e instanceof DisconnectedError) {
+                try { await cometClient.reconnect(); } catch { /* will retry next iter */ }
+                consecutiveErrors++;
+                continue;
               }
-
-              if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
-                try {
-                  await cometClient.ensureConnection();
-                  await cometClient.ensureOnPerplexityTab();
-                  consecutiveErrors = 0;
-                } catch {
-                  break;
+              if (e instanceof TimedOutError) {
+                consecutiveErrors++;
+                if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+                  try {
+                    await cometClient.ensureConnection();
+                    await cometClient.ensureOnPerplexityTab();
+                    consecutiveErrors = 0;
+                  } catch { break; }
                 }
+                continue;
               }
-              continue;
+              throw e;
             }
           }
 
