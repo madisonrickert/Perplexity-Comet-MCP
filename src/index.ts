@@ -592,11 +592,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: "text", text: `Status: COMPLETED (${timeSinceComplete}s ago)\n\n${sessionState.lastResponse}` }] };
         }
 
-        // Active task - get fresh status from Perplexity
-        const switched = await Promise.race([
-          cometClient.ensureOnPerplexityTab(),
-          new Promise<boolean>(resolve => setTimeout(() => resolve(false), 3000))
-        ]);
+        // Active task — get fresh status from Perplexity. If we can't reach
+        // the tab within SHORT_OP_MS, surface progress info from the cached
+        // session state and tell the user to use comet_screenshot/comet_stop.
+        let switched = false;
+        try {
+          switched = await cometClient.ensureOnPerplexityTabBounded(SHORT_OP_MS);
+        } catch (e) {
+          if (!(e instanceof TimedOutError) && !(e instanceof DisconnectedError)) throw e;
+        }
 
         if (!switched) {
           const elapsedSec = sessionState.taskStartTime ? Math.round((Date.now() - sessionState.taskStartTime) / 1000) : null;
@@ -611,9 +615,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: "text", text: output }] };
         }
 
-        const status = await Promise.race([
-          cometAI.getAgentStatus(),
-          new Promise<Awaited<ReturnType<typeof cometAI.getAgentStatus>>>(resolve => setTimeout(() => resolve({
+        // If getAgentStatus times out (its inner evaluate is bounded), fall
+        // back to a synthesized status from cached session state so callers
+        // still get a useful response.
+        let status: Awaited<ReturnType<typeof cometAI.getAgentStatus>>;
+        try {
+          status = await cometAI.getAgentStatus();
+        } catch (e) {
+          if (!(e instanceof TimedOutError) && !(e instanceof DisconnectedError)) throw e;
+          status = {
             status: sessionState.isActive ? 'working' : 'idle',
             steps: sessionState.steps,
             currentStep: '',
@@ -624,8 +634,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             blockedReason: undefined,
             blockedMessage: undefined,
             browserAutomationAvailable: true,
-          }), 4000))
-        ]);
+          };
+        }
 
         if (status.status === 'blocked') {
           const blockedText = [
