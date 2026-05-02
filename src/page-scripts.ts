@@ -196,36 +196,62 @@ export function extractAgentStatus(): AgentStatusResult {
 
   // Response extraction runs unconditionally so idle-timeout and stability paths
   // in the polling loop see the latest text even before status flips to completed.
+  //
+  // Prose-first strategy. Perplexity renders assistant answers inside
+  // `[class*="prose"]` containers. Inline citation chips (e.g. "pnpm +1") are
+  // descendants of the same <p> as the answer, so the container's raw
+  // `innerText` includes chip labels. We subtract each chip's rendered text
+  // from the parent's text instead of cloning/mutating the DOM (which would
+  // race with React).
   let response = "";
   {
     const mainContent = (document.querySelector("main") || document.body) as HTMLElement;
-    const bodyText = mainContent.innerText;
 
-    // Strategy 1: Find content after "X steps completed" marker (agent's final response)
-    const stepsMatch = bodyText.match(/(\d+)\s*steps?\s*completed/i);
-    if (stepsMatch) {
-      const markerIndex = bodyText.indexOf(stepsMatch[0]);
-      if (markerIndex !== -1) {
-        let afterMarker = bodyText.substring(markerIndex + stepsMatch[0].length).trim();
-        afterMarker = afterMarker.replace(/^[>›→\s]+/, "").trim();
-        const endMarkers = ["Ask anything", "Ask a follow-up", "Add details", "Type a message"];
-        let endIndex = afterMarker.length;
-        for (const marker of endMarkers) {
-          const idx = afterMarker.indexOf(marker);
-          if (idx !== -1 && idx < endIndex) endIndex = idx;
+    // Strategy 1 (preferred): read prose containers directly.
+    {
+      const stripChips = (el: HTMLElement): string => {
+        let text = el.innerText;
+        const chipNodes = el.querySelectorAll(
+          '[class*="citation" i], [class*="source" i], [class*="chip" i], [data-citation], [data-source], a, button, [role="link"], [role="button"]'
+        );
+        for (const c of chipNodes) {
+          const chipText = ((c as HTMLElement).innerText || "").trim();
+          if (chipText.length > 0) text = text.split(chipText).join("");
         }
-        response = afterMarker.substring(0, endIndex).trim();
+        return text.replace(/\n{3,}/g, "\n\n").trim();
+      };
+      const proseEls = [...mainContent.querySelectorAll('[class*="prose"]')] as HTMLElement[];
+      const validTexts = proseEls
+        .filter((el) => {
+          if (el.closest("nav, aside, header, footer, form, [contenteditable]")) return false;
+          const text = stripChips(el);
+          if (text.length === 0) return false;
+          const isUIText = ["Library", "Discover", "Spaces", "Finance", "Account",
+                            "Upgrade", "Home", "Search"].some((ui) => text.startsWith(ui));
+          return !isUIText;
+        })
+        .map((el) => stripChips(el));
+
+      if (validTexts.length > 0) {
+        response = validTexts.join("\n\n");
       }
     }
 
-    // Strategy 2: If no steps marker, look for content after source citations
+    // Strategy 2 (fallback): if no prose container exists yet (early streaming
+    // or unusual UI state), recover from bodyText after a known marker. This
+    // path is fragile (citation chips show up inline) and only runs when
+    // nothing better is available.
     if (!response || response.length < 1) {
-      const sourcesMatch = bodyText.match(/Reviewed\s+\d+\s+sources?/i);
-      if (sourcesMatch) {
-        const markerIndex = bodyText.indexOf(sourcesMatch[0]);
+      const bodyText = mainContent.innerText;
+      const stepsMatch = bodyText.match(/(\d+)\s*steps?\s*completed/i);
+      const sourcesMatch = !stepsMatch ? bodyText.match(/Reviewed\s+\d+\s+sources?/i) : null;
+      const match = stepsMatch || sourcesMatch;
+      if (match) {
+        const markerIndex = bodyText.indexOf(match[0]);
         if (markerIndex !== -1) {
-          let afterMarker = bodyText.substring(markerIndex + sourcesMatch[0].length).trim();
-          const endMarkers = ["Ask anything", "Ask a follow-up", "Add details"];
+          let afterMarker = bodyText.substring(markerIndex + match[0].length).trim();
+          afterMarker = afterMarker.replace(/^[>›→\s]+/, "").trim();
+          const endMarkers = ["Ask anything", "Ask a follow-up", "Add details", "Type a message"];
           let endIndex = afterMarker.length;
           for (const marker of endMarkers) {
             const idx = afterMarker.indexOf(marker);
@@ -233,24 +259,6 @@ export function extractAgentStatus(): AgentStatusResult {
           }
           response = afterMarker.substring(0, endIndex).trim();
         }
-      }
-    }
-
-    // Strategy 3: Fallback - get all prose content combined
-    if (!response || response.length < 1) {
-      const allProseEls = [...mainContent.querySelectorAll('[class*="prose"]')] as HTMLElement[];
-      const validTexts = allProseEls
-        .filter((el) => {
-          if (el.closest("nav, aside, header, footer, form, [contenteditable]")) return false;
-          const text = el.innerText.trim();
-          const isUIText = ["Library", "Discover", "Spaces", "Finance", "Account",
-                            "Upgrade", "Home", "Search"].some((ui) => text.startsWith(ui));
-          return !isUIText && text.length > 0;
-        })
-        .map((el) => el.innerText.trim());
-
-      if (validTexts.length > 0) {
-        response = validTexts.slice(-3).join("\n\n");
       }
     }
   }
