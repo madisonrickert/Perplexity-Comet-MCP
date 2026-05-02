@@ -194,6 +194,12 @@ export class CometCDPClient {
   // Tab context registry for multi-tab workflow awareness
   private tabRegistry: Map<string, TabContext> = new Map();
 
+  // Page lifecycle tracking — events accumulated per frame for the current
+  // document (loaderId). Used by waitForLifecycle() so screenshots and other
+  // ops can confirm the renderer has actually painted before they run.
+  private frameLifecycle: Map<string, { loaderId: string; events: Set<string> }> = new Map();
+  private lifecycleListener: ((params: any) => void) | null = null;
+
   get isConnected(): boolean {
     return this.state.connected && this.client !== null;
   }
@@ -1011,6 +1017,25 @@ export class CometCDPClient {
       this.client.Network.enable(),
     ]);
 
+    // Subscribe to Page.lifecycleEvent so we can wait for paint readiness
+    // (firstContentfulPaint, networkAlmostIdle, etc.) the way Lighthouse and
+    // Puppeteer do, instead of polling document.readyState.
+    this.frameLifecycle.clear();
+    try {
+      await this.client.Page.setLifecycleEventsEnabled({ enabled: true });
+      this.lifecycleListener = (params: any) => {
+        const { frameId, loaderId, name } = params || {};
+        if (!frameId || !loaderId || !name) return;
+        const existing = this.frameLifecycle.get(frameId);
+        if (!existing || existing.loaderId !== loaderId) {
+          this.frameLifecycle.set(frameId, { loaderId, events: new Set([name]) });
+        } else {
+          existing.events.add(name);
+        }
+      };
+      this.client.Page.lifecycleEvent(this.lifecycleListener);
+    } catch { /* lifecycle tracking is best-effort */ }
+
     this.state.connected = true;
     this.state.activeTabId = targetId;
     this.lastTargetId = targetId;
@@ -1020,6 +1045,34 @@ export class CometCDPClient {
     this.state.currentUrl = result.value as string;
 
     return `Connected to tab: ${this.state.currentUrl}`;
+  }
+
+  /**
+   * Wait for any frame in the current document to have fired the named
+   * Page.lifecycleEvent (e.g. 'firstContentfulPaint', 'networkAlmostIdle').
+   * Returns true if the event has fired (or fires before the timeout); false
+   * on timeout. If the event has already fired before this is called,
+   * resolves synchronously.
+   */
+  async waitForLifecycle(eventName: string, timeoutMs: number): Promise<boolean> {
+    if (!this.client) return false;
+    for (const { events } of this.frameLifecycle.values()) {
+      if (events.has(eventName)) return true;
+    }
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      const finish = (val: boolean) => {
+        if (done) return;
+        done = true;
+        try { (this.client as any)?.removeListener?.('Page.lifecycleEvent', listener); } catch { /* ignore */ }
+        clearTimeout(timer);
+        resolve(val);
+      };
+      const listener = (params: any) => { if (params?.name === eventName) finish(true); };
+      try { (this.client as any).on('Page.lifecycleEvent', listener); }
+      catch { finish(false); return; }
+      const timer = setTimeout(() => finish(false), timeoutMs);
+    });
   }
 
   /**
@@ -1101,6 +1154,11 @@ export class CometCDPClient {
     this.ensureConnected();
 
     try { await this.client!.Page.bringToFront(); } catch { /* not all targets support it */ }
+
+    // Wait for paint readiness via Page.lifecycleEvent (Lighthouse/Puppeteer
+    // approach). If firstContentfulPaint already fired for this document the
+    // call returns synchronously; otherwise we wait up to 2s for the next FCP.
+    await this.waitForLifecycle('firstContentfulPaint', 2000);
 
     // Hidden targets (e.g. the Perplexity sidecar panel) report a 0x0 layout
     // viewport; Page.captureScreenshot then waits for compositor frames that
