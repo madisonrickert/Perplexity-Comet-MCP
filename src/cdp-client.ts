@@ -1099,7 +1099,37 @@ export class CometCDPClient {
    */
   async screenshot(format: "png" | "jpeg" = "png"): Promise<ScreenshotResult> {
     this.ensureConnected();
-    return this.client!.Page.captureScreenshot({ format }) as Promise<ScreenshotResult>;
+
+    try { await this.client!.Page.bringToFront(); } catch { /* not all targets support it */ }
+
+    // Hidden targets (e.g. the Perplexity sidecar panel) report a 0x0 layout
+    // viewport; Page.captureScreenshot then waits for compositor frames that
+    // never arrive and hangs for ~2 minutes. When that happens, supply an
+    // explicit clip + captureBeyondViewport so the renderer produces a frame
+    // immediately.
+    let clip: { x: number; y: number; width: number; height: number; scale: number } | undefined;
+    try {
+      const metrics = await this.client!.Page.getLayoutMetrics();
+      const v = metrics.cssLayoutViewport ?? metrics.layoutViewport;
+      if (!v?.clientWidth || !v?.clientHeight) {
+        clip = { x: 0, y: 0, width: 1280, height: 800, scale: 1 };
+      }
+    } catch {
+      clip = { x: 0, y: 0, width: 1280, height: 800, scale: 1 };
+    }
+
+    const result = await this.client!.Page.captureScreenshot({
+      format,
+      ...(clip ? { captureBeyondViewport: true, clip } : {}),
+    }) as ScreenshotResult;
+
+    if (!result?.data) {
+      throw new Error(
+        "Screenshot returned empty data. Ensure you're connected to a visible tab with content.",
+      );
+    }
+
+    return result;
   }
 
   /**

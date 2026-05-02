@@ -750,10 +750,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "comet_screenshot": {
-        const result = await Promise.race([
-          cometClient.screenshot("png"),
-          new Promise<never>((_, reject) => setTimeout(() => reject(new Error('Screenshot timed out')), 5000))
-        ]);
+        const result = await cometClient.screenshot("png");
         return {
           content: [{ type: "image", data: result.data, mimeType: "image/png" }],
         };
