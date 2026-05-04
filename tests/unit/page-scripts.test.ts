@@ -106,3 +106,44 @@ describe("extractAgentStatus", () => {
     expect(result.currentStep).toMatch(/Searching for|Reading|Navigating/);
   });
 });
+
+describe("extractAgentStatus stop-button refinement", () => {
+  it("ignores buttons whose aria-label matches a dismiss/login keyword", () => {
+    // A button with both 'stop' and 'login' in its aria-label is a sign-in
+    // dismiss button, NOT an agent stop button. The exclusion list
+    // (close/dismiss/sign/login/modal) means we should skip it.
+    document.body.innerHTML = `<button aria-label="Close login modal">×</button>`;
+    const btn = document.querySelector("button") as HTMLButtonElement;
+    markVisible(btn);
+
+    const result = extractAgentStatus();
+    expect(result.hasStopButton).toBe(false);
+  });
+
+  it("does not flag a non-square rect as a stop indicator", () => {
+    // The stop-button square-rect detection requires width ≈ height (within 4px).
+    // A 10×20 rect is clearly not square — it shouldn't promote the button to a stop.
+    document.body.innerHTML = `
+      <button aria-label="some-action">
+        <svg><rect width="10" height="20"></rect></svg>
+      </button>`;
+    const btn = document.querySelector("button") as HTMLButtonElement;
+    markVisible(btn);
+
+    const result = extractAgentStatus();
+    expect(result.hasStopButton).toBe(false);
+  });
+
+  it("flags a button with a square rect (width ≈ height) as a stop indicator", () => {
+    document.body.innerHTML = `
+      <button aria-label="some-action">
+        <svg><rect width="20" height="20"></rect></svg>
+      </button>`;
+    const btn = document.querySelector("button") as HTMLButtonElement;
+    markVisible(btn);
+
+    const result = extractAgentStatus();
+    expect(result.hasStopButton).toBe(true);
+    expect(result.status).toBe("working");
+  });
+});
