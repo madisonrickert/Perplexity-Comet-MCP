@@ -18,6 +18,7 @@ import {
   startNewTask,
   completeTask,
   isSessionStale,
+  readCachedResponse,
 } from "./session-state.js";
 import { readProseState, type ProseState } from "./page-scripts.js";
 import {
@@ -580,16 +581,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: "text", text: "Status: IDLE\nPrevious task session expired. Use comet_ask to start a new task." }] };
         }
 
-        if (!sessionState.isActive && sessionState.lastTerminalStatus === 'blocked' && sessionState.lastResponse) {
-          return { content: [{ type: "text", text: sessionState.lastResponse }] };
+        // Cached response from a finished task, gated on RESPONSE_CACHE_TTL_MS.
+        // Past the TTL the helper evicts the cache so the next branch falls
+        // through to IDLE — prevents the agent answering a question the user
+        // already saw resolved minutes ago.
+        const cached = readCachedResponse();
+        if (cached) {
+          if (cached.terminalStatus === 'blocked') {
+            return { content: [{ type: "text", text: cached.text }] };
+          }
+          return { content: [{ type: "text", text: `Status: COMPLETED (${cached.ageSeconds}s ago)\n\n${cached.text}` }] };
         }
 
-        // If task was already completed, return the cached response
-        if (!sessionState.isActive && sessionState.lastResponse && sessionState.lastTerminalStatus === 'completed') {
-          const timeSinceComplete = sessionState.lastResponseTime
-            ? Math.round((Date.now() - sessionState.lastResponseTime) / 1000)
-            : 0;
-          return { content: [{ type: "text", text: `Status: COMPLETED (${timeSinceComplete}s ago)\n\n${sessionState.lastResponse}` }] };
+        // No fresh cache and no active task — the previous task ended long
+        // enough ago that we should not re-read live DOM. Live reads here
+        // would surface the prior task's prose.
+        if (!sessionState.isActive) {
+          return { content: [{ type: "text", text: "Status: IDLE\nPrevious task expired. Use comet_ask to start a new task." }] };
         }
 
         // Active task — get fresh status from Perplexity. If we can't reach
