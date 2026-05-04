@@ -435,7 +435,7 @@ export class CometAI {
    * previous task's response as the current one.
    */
   async getAgentStatus(options: { proseWatermark?: number } = {}): Promise<{
-    status: "idle" | "working" | "completed" | "blocked";
+    status: "idle" | "working" | "completed" | "blocked" | "skipped";
     steps: string[];
     currentStep: string;
     response: string;
@@ -445,6 +445,8 @@ export class CometAI {
     blockedReason?: "login_required";
     blockedMessage?: string;
     browserAutomationAvailable: boolean;
+    skippedReason?: AgentStatusResult["skippedReason"];
+    skippedMessage?: string;
   }> {
     // Get browsing URL from agent's tab
     let agentBrowsingUrl = '';
@@ -465,8 +467,12 @@ export class CometAI {
     // Check response stability
     const isStable = this.isResponseStable(statusResult.response);
 
-    // If response is stable and has content, override status to completed
-    if (statusResult.status !== 'blocked' && isStable && statusResult.response.trim().length > 0 && !statusResult.hasStopButton) {
+    // If response is stable and has content, override status to completed.
+    // Blocked and skipped are terminal failure modes that must not be
+    // overridden by the stability heuristic — without this guard a stale
+    // partial response could appear successful even though the page UI
+    // showed a clear failure indicator.
+    if (statusResult.status !== 'blocked' && statusResult.status !== 'skipped' && isStable && statusResult.response.trim().length > 0 && !statusResult.hasStopButton) {
       statusResult.status = 'completed';
     }
 

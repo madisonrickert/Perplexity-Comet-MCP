@@ -16,9 +16,11 @@ export interface SessionState {
   lastResponse: string | null;
   lastResponseTime: number | null;
   /** How the task ended. `null` while in progress. */
-  lastTerminalStatus: "completed" | "blocked" | null;
+  lastTerminalStatus: "completed" | "blocked" | "skipped" | null;
   /** Reason a task was blocked (e.g. login wall). `null` for non-blocked outcomes. */
   lastBlockedReason: string | null;
+  /** Reason the agent skipped/abandoned (e.g. "answer_skipped"). `null` for non-skipped outcomes. */
+  lastSkippedReason: string | null;
   /**
    * Number of `[class*="prose"]` elements present in the DOM at task start.
    * Used as a watermark so getAgentStatus only considers prose blocks
@@ -33,8 +35,9 @@ export interface SessionState {
 export interface CachedResponse {
   text: string;
   ageSeconds: number;
-  terminalStatus: "completed" | "blocked";
+  terminalStatus: "completed" | "blocked" | "skipped";
   blockedReason: string | null;
+  skippedReason: string | null;
 }
 
 export const sessionState: SessionState = {
@@ -45,6 +48,7 @@ export const sessionState: SessionState = {
   lastResponseTime: null,
   lastTerminalStatus: null,
   lastBlockedReason: null,
+  lastSkippedReason: null,
   proseBaselineCount: 0,
   steps: [],
   isActive: false,
@@ -63,6 +67,7 @@ export function startNewTask(prompt: string): string {
   sessionState.lastResponseTime = null;
   sessionState.lastTerminalStatus = null;
   sessionState.lastBlockedReason = null;
+  sessionState.lastSkippedReason = null;
   sessionState.proseBaselineCount = 0;
   sessionState.steps = [];
   sessionState.isActive = true;
@@ -70,15 +75,22 @@ export function startNewTask(prompt: string): string {
   return taskId;
 }
 
+/**
+ * Record a task's terminal state. The `reason` parameter is interpreted
+ * based on `terminalStatus`: stored as lastBlockedReason for blocked
+ * outcomes, lastSkippedReason for skipped outcomes, and ignored for
+ * completed outcomes.
+ */
 export function completeTask(
   response: string,
-  terminalStatus: "completed" | "blocked" = "completed",
-  blockedReason: string | null = null,
+  terminalStatus: "completed" | "blocked" | "skipped" = "completed",
+  reason: string | null = null,
 ): void {
   sessionState.lastResponse = response;
   sessionState.lastResponseTime = Date.now();
   sessionState.lastTerminalStatus = terminalStatus;
-  sessionState.lastBlockedReason = blockedReason;
+  sessionState.lastBlockedReason = terminalStatus === "blocked" ? reason : null;
+  sessionState.lastSkippedReason = terminalStatus === "skipped" ? reason : null;
   sessionState.isActive = false;
 }
 
@@ -119,7 +131,11 @@ export function getActiveTaskCollision(): ActiveTaskCollision | null {
 export function readCachedResponse(now: number = Date.now()): CachedResponse | null {
   if (sessionState.isActive) return null;
   if (!sessionState.lastResponse || !sessionState.lastResponseTime) return null;
-  if (sessionState.lastTerminalStatus !== "completed" && sessionState.lastTerminalStatus !== "blocked") {
+  if (
+    sessionState.lastTerminalStatus !== "completed" &&
+    sessionState.lastTerminalStatus !== "blocked" &&
+    sessionState.lastTerminalStatus !== "skipped"
+  ) {
     return null;
   }
   const ageMs = now - sessionState.lastResponseTime;
@@ -128,6 +144,7 @@ export function readCachedResponse(now: number = Date.now()): CachedResponse | n
     sessionState.lastResponseTime = null;
     sessionState.lastTerminalStatus = null;
     sessionState.lastBlockedReason = null;
+    sessionState.lastSkippedReason = null;
     return null;
   }
   return {
@@ -135,5 +152,6 @@ export function readCachedResponse(now: number = Date.now()): CachedResponse | n
     ageSeconds: Math.round(ageMs / 1000),
     terminalStatus: sessionState.lastTerminalStatus,
     blockedReason: sessionState.lastBlockedReason,
+    skippedReason: sessionState.lastSkippedReason,
   };
 }

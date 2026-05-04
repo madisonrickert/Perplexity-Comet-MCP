@@ -527,6 +527,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 return { content: [{ type: "text", text: message }] };
               }
 
+              // Agent gave up via the page UI (e.g. "Answer skipped"). Exit
+              // immediately rather than waiting for maxTimeout — caller can
+              // see the skip reason and decide whether to retry.
+              if (status.status === 'skipped') {
+                const skippedReason = status.skippedReason || 'answer_skipped';
+                const skippedHeader = [
+                  'Status: SKIPPED',
+                  `Reason: ${skippedReason.toUpperCase()}`,
+                  '',
+                  status.skippedMessage || 'The agent did not complete this task.',
+                ];
+                const partialResponse = status.response || lastKnownResponse;
+                if (partialResponse) {
+                  skippedHeader.push('', 'Partial assistant output:', partialResponse);
+                }
+                const message = skippedHeader.join('\n');
+                completeTask(message, 'skipped', skippedReason);
+                return { content: [{ type: "text", text: message }] };
+              }
+
               if (status.status === 'completed' && sawNewResponse && status.response) {
                 return await completeWithSettledResponse(status.response);
               }
@@ -607,7 +627,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // already saw resolved minutes ago.
         const cached = readCachedResponse();
         if (cached) {
-          if (cached.terminalStatus === 'blocked') {
+          if (cached.terminalStatus === 'blocked' || cached.terminalStatus === 'skipped') {
             return { content: [{ type: "text", text: cached.text }] };
           }
           return { content: [{ type: "text", text: `Status: COMPLETED (${cached.ageSeconds}s ago)\n\n${cached.text}` }] };
@@ -680,6 +700,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           const message = blockedText.join('\n');
           completeTask(message, 'blocked', status.blockedReason || sessionState.lastBlockedReason);
+          return { content: [{ type: "text", text: message }] };
+        }
+
+        if (status.status === 'skipped') {
+          const skippedReason = status.skippedReason || sessionState.lastSkippedReason || 'answer_skipped';
+          const skippedText = [
+            'Status: SKIPPED',
+            `Reason: ${skippedReason.toUpperCase()}`,
+            '',
+            status.skippedMessage || 'The agent did not complete this task.',
+          ];
+
+          if (status.response) {
+            skippedText.push('', 'Partial assistant output:', status.response);
+          }
+
+          const message = skippedText.join('\n');
+          completeTask(message, 'skipped', skippedReason);
           return { content: [{ type: "text", text: message }] };
         }
 

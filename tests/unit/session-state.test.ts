@@ -18,6 +18,7 @@ function resetSessionState(): void {
   sessionState.lastResponseTime = null;
   sessionState.lastTerminalStatus = null;
   sessionState.lastBlockedReason = null;
+  sessionState.lastSkippedReason = null;
   sessionState.proseBaselineCount = 0;
   sessionState.steps = [];
   sessionState.isActive = false;
@@ -123,6 +124,18 @@ describe("completeTask", () => {
     expect(sessionState.lastBlockedReason).toBe("login_required");
     expect(sessionState.isActive).toBe(false);
     expect(sessionState.lastResponse).toBe("[error message]");
+  });
+
+  it("records 'skipped' terminalStatus and stores the reason in lastSkippedReason", () => {
+    startNewTask("a prompt");
+    completeTask("[skipped message]", "skipped", "answer_skipped");
+
+    expect(sessionState.lastTerminalStatus).toBe("skipped");
+    expect(sessionState.lastSkippedReason).toBe("answer_skipped");
+    // skipped reasons are kept separate from blocked reasons so callers
+    // displaying one don't leak the other.
+    expect(sessionState.lastBlockedReason).toBeNull();
+    expect(sessionState.isActive).toBe(false);
   });
 });
 
