@@ -26,7 +26,7 @@ export function readProseState(): ProseState {
 }
 
 export interface AgentStatusResult {
-  status: "idle" | "working" | "completed" | "blocked";
+  status: "idle" | "working" | "completed" | "blocked" | "skipped";
   steps: string[];
   currentStep: string;
   response: string;
@@ -37,6 +37,14 @@ export interface AgentStatusResult {
   blockedMessage?: string;
   /** False when Comet's browser automation is unavailable (logged out, etc.). */
   browserAutomationAvailable: boolean;
+  /**
+   * Surface text Perplexity rendered when the agent gave up. `undefined`
+   * unless the page shows an "Answer skipped" / "Task abandoned" /
+   * "Unable to complete" indicator with no active stop button.
+   */
+  skippedReason?: "answer_skipped" | "task_abandoned" | "unable_to_complete";
+  /** Human-readable explanation of the skipped state. `undefined` if not skipped. */
+  skippedMessage?: string;
 }
 
 export interface ExtractAgentStatusOptions {
@@ -148,6 +156,28 @@ export function extractAgentStatus(options: ExtractAgentStatusOptions = {}): Age
     ? "Comet browser automation is unavailable because the browser is logged out. Sign in to unlock full capabilities."
     : undefined;
 
+  // Detect Perplexity's failure-mode UI for when the agent gives up partway
+  // through. Without this, "X steps completed" with no prose body looks
+  // identical to a successful empty-completion, so the polling loop burns
+  // its full timeout instead of failing fast.
+  const hasAnswerSkippedText = body.includes("Answer skipped");
+  const hasTaskAbandonedText = body.includes("Task abandoned");
+  const hasUnableToCompleteText = body.includes("Unable to complete");
+  const skippedReason: AgentStatusResult["skippedReason"] = hasAnswerSkippedText
+    ? "answer_skipped"
+    : hasTaskAbandonedText
+      ? "task_abandoned"
+      : hasUnableToCompleteText
+        ? "unable_to_complete"
+        : undefined;
+  const skippedMessage: string | undefined = skippedReason
+    ? hasAnswerSkippedText
+      ? "The agent skipped this task. Try a shorter or simpler prompt, or split the request into smaller pieces."
+      : hasTaskAbandonedText
+        ? "The agent abandoned this task. Try a shorter or simpler prompt, or split the request into smaller pieces."
+        : "The agent could not complete this task. Try a shorter or simpler prompt, or split the request into smaller pieces."
+    : undefined;
+
   // Prose-content threshold lowered to >0 so short answers (e.g. "2 + 2 = 4.")
   // are detected. Sidebar/UI text is filtered out by prefix.
   // Apply the watermark up-front: prose blocks that existed before this task's
@@ -175,16 +205,19 @@ export function extractAgentStatus(options: ExtractAgentStatusOptions = {}): Age
   ];
   const hasWorkingText = workingPatterns.some((p) => body.includes(p));
 
-  // Status determination. Blocked beats everything: if the browser is logged
-  // out, no other detection is meaningful. Otherwise AskFollowUp+Prose ranks
-  // above LoadingSpinner because a visible follow-up prompt with prose is a
-  // stronger completion signal than a stale spinner sitting somewhere on the page.
-  let status: "idle" | "working" | "completed" | "blocked" = "idle";
+  // Status determination. Blocked beats everything (login wall makes other
+  // detection meaningless). Working (active stop button) beats skipped
+  // because the agent might still recover. Skipped beats completed so a
+  // skip page with "X steps completed" plus no prose is reported as a
+  // failure rather than a successful empty answer.
+  let status: AgentStatusResult["status"] = "idle";
 
   if (browserAutomationBlocked) {
     status = "blocked";
   } else if (hasActiveStopButton) {
     status = "working";
+  } else if (skippedReason) {
+    status = "skipped";
   } else if (hasAskFollowUp && hasProseContent) {
     status = "completed";
   } else if (hasStepsCompleted || hasFinishedMarker) {
@@ -306,5 +339,7 @@ export function extractAgentStatus(options: ExtractAgentStatusOptions = {}): Age
     blockedReason,
     blockedMessage,
     browserAutomationAvailable: !browserAutomationBlocked,
+    skippedReason,
+    skippedMessage,
   };
 }

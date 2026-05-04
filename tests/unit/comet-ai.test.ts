@@ -154,6 +154,54 @@ describe("CometAI.getAgentStatus", () => {
   });
 });
 
+describe("CometAI.getAgentStatus skipped propagation", () => {
+  it("propagates a skipped status from the page-side result", async () => {
+    const fake = new FakeCdpClient();
+    fake.setEvaluateResult({
+      status: "skipped",
+      steps: [],
+      currentStep: "",
+      response: "",
+      hasStopButton: false,
+      skippedReason: "answer_skipped",
+      skippedMessage: "The agent skipped this task.",
+    });
+
+    const ai = new CometAI(fake);
+    const status = await ai.getAgentStatus();
+
+    expect(status.status).toBe("skipped");
+    expect(status.skippedReason).toBe("answer_skipped");
+    expect(status.skippedMessage).toMatch(/skip/i);
+  });
+
+  it("does NOT override skipped to completed via the stability heuristic", async () => {
+    // Skipped is a terminal failure mode — even if the response text has
+    // stabilized (for example, partial output that the agent never resumed),
+    // we must not promote it to "completed" or the caller would think the
+    // task succeeded.
+    const fake = new FakeCdpClient();
+    fake.setEvaluateResult({
+      status: "skipped",
+      steps: [],
+      currentStep: "",
+      response: "Partial answer that never finished.",
+      hasStopButton: false,
+      skippedReason: "answer_skipped",
+      skippedMessage: "The agent skipped this task.",
+    });
+
+    const ai = new CometAI(fake);
+    // Burn enough polls to make the response "stable" by the heuristic.
+    await ai.getAgentStatus();
+    await ai.getAgentStatus();
+    const status = await ai.getAgentStatus();
+
+    expect(status.status).toBe("skipped");
+    expect(status.isStable).toBe(true);
+  });
+});
+
 describe("CometAI.getBrowserBlockState", () => {
   it("propagates a canned login_required block-state from safeEvaluate", async () => {
     const fake = new FakeCdpClient();

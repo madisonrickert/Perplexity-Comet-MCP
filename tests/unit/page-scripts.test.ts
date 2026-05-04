@@ -242,6 +242,77 @@ describe("extractAgentStatus prose watermark", () => {
   });
 });
 
+describe("extractAgentStatus skipped-state detection", () => {
+  it("returns status='skipped' when 'Answer skipped' is on the page with no stop button", () => {
+    document.body.innerHTML = `
+      <main>
+        <div>5 steps completed</div>
+        <div>Answer skipped</div>
+      </main>
+    `;
+
+    const result = extractAgentStatus();
+    expect(result.status).toBe("skipped");
+    expect(result.skippedReason).toBe("answer_skipped");
+    expect(result.skippedMessage).toBeTruthy();
+    expect(result.hasStopButton).toBe(false);
+  });
+
+  it("returns status='skipped' when 'Task abandoned' is on the page", () => {
+    document.body.innerHTML = `
+      <main>
+        <div>Task abandoned</div>
+      </main>
+    `;
+
+    const result = extractAgentStatus();
+    expect(result.status).toBe("skipped");
+    expect(result.skippedReason).toBe("task_abandoned");
+  });
+
+  it("returns status='skipped' when 'Unable to complete' is on the page", () => {
+    document.body.innerHTML = `
+      <main>
+        <div>Unable to complete this request</div>
+      </main>
+    `;
+
+    const result = extractAgentStatus();
+    expect(result.status).toBe("skipped");
+    expect(result.skippedReason).toBe("unable_to_complete");
+  });
+
+  it("does NOT return skipped when the page is in a normal completed state", () => {
+    document.body.innerHTML = `
+      <main>
+        <div>Reviewed 12 sources</div>
+        <div class="prose">A clean answer with no failure indicators of any kind.</div>
+      </main>
+    `;
+
+    const result = extractAgentStatus();
+    expect(result.status).not.toBe("skipped");
+    expect(result.skippedReason).toBeUndefined();
+    expect(result.skippedMessage).toBeUndefined();
+  });
+
+  it("prefers 'working' over 'skipped' while a stop button is still visible", () => {
+    // The agent might be retrying; don't surface skip until the stop button
+    // is gone.
+    document.body.innerHTML = `
+      <main>
+        <button aria-label="Stop">stop</button>
+        <div>Answer skipped</div>
+      </main>
+    `;
+    const btn = document.querySelector("button") as HTMLButtonElement;
+    markVisible(btn);
+
+    const result = extractAgentStatus();
+    expect(result.status).toBe("working");
+  });
+});
+
 describe("extractAgentStatus blocked-state detection", () => {
   it("returns status='blocked' when the logged-out browser banner is present", () => {
     document.body.innerHTML = `
