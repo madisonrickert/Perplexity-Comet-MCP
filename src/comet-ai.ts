@@ -439,6 +439,7 @@ export class CometAI {
     steps: string[];
     currentStep: string;
     response: string;
+    truncated: boolean;
     hasStopButton: boolean;
     agentBrowsingUrl: string;
     isStable: boolean;

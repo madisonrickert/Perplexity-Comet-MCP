@@ -25,11 +25,25 @@ export function readProseState(): ProseState {
   };
 }
 
+/**
+ * Maximum response length surfaced to MCP callers. Picked to comfortably
+ * fit a long structured listing (e.g. a 50-row table) without bumping
+ * against typical MCP message-size guidance.
+ *
+ * NOTE: this value is *also* hardcoded as a literal inside
+ * `extractAgentStatus` (the function body is shipped to the page via
+ * `Function.toString()`, so closure variables aren't visible in the
+ * page eval context). Keep both in sync.
+ */
+export const MAX_RESPONSE_CHARS = 32_000;
+
 export interface AgentStatusResult {
   status: "idle" | "working" | "completed" | "blocked" | "skipped";
   steps: string[];
   currentStep: string;
   response: string;
+  /** True when the page rendered more text than `response` was allowed to carry. */
+  truncated: boolean;
   hasStopButton: boolean;
   /** Reason browser automation is blocked, e.g. "login_required". `undefined` if unblocked. */
   blockedReason?: "login_required";
@@ -330,11 +344,14 @@ export function extractAgentStatus(options: ExtractAgentStatusOptions = {}): Age
       .trim();
   }
 
+  // Keep this literal in sync with MAX_RESPONSE_CHARS — see the export note.
+  const truncated = response.length > 32000;
   return {
     status,
     steps: [...new Set(steps)].slice(-5),
     currentStep: steps.length > 0 ? steps[steps.length - 1] : "",
-    response: response.substring(0, 8000),
+    response: response.substring(0, 32000),
+    truncated,
     hasStopButton: hasActiveStopButton,
     blockedReason,
     blockedMessage,

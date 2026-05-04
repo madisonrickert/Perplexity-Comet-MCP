@@ -676,6 +676,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             steps: sessionState.steps,
             currentStep: '',
             response: sessionState.lastResponse || '',
+            truncated: false,
             hasStopButton: sessionState.isActive,
             agentBrowsingUrl: '',
             isStable: false,
