@@ -16,11 +16,18 @@ export interface SessionState {
   lastResponse: string | null;
   lastResponseTime: number | null;
   /** How the task ended. `null` while in progress. */
-  lastTerminalStatus: "completed" | "blocked" | "skipped" | null;
+  lastTerminalStatus: "completed" | "blocked" | "skipped" | "stuck" | null;
   /** Reason a task was blocked (e.g. login wall). `null` for non-blocked outcomes. */
   lastBlockedReason: string | null;
   /** Reason the agent skipped/abandoned (e.g. "answer_skipped"). `null` for non-skipped outcomes. */
   lastSkippedReason: string | null;
+  /**
+   * Step the agent appeared stuck on when the polling loop's failsafe fired.
+   * `null` for non-stuck outcomes. Stored separately from blocked/skipped
+   * reasons so callers can distinguish "stalled mid-step" from "page UI
+   * said skip" or "logged out."
+   */
+  lastStuckStep: string | null;
   /**
    * Number of `[class*="prose"]` elements present in the DOM at task start.
    * Used as a watermark so getAgentStatus only considers prose blocks
@@ -42,9 +49,10 @@ export interface SessionState {
 export interface CachedResponse {
   text: string;
   ageSeconds: number;
-  terminalStatus: "completed" | "blocked" | "skipped";
+  terminalStatus: "completed" | "blocked" | "skipped" | "stuck";
   blockedReason: string | null;
   skippedReason: string | null;
+  stuckStep: string | null;
 }
 
 export const sessionState: SessionState = {
@@ -56,6 +64,7 @@ export const sessionState: SessionState = {
   lastTerminalStatus: null,
   lastBlockedReason: null,
   lastSkippedReason: null,
+  lastStuckStep: null,
   proseBaselineCount: 0,
   tabBaselineExternalIds: [],
   steps: [],
@@ -76,6 +85,7 @@ export function startNewTask(prompt: string): string {
   sessionState.lastTerminalStatus = null;
   sessionState.lastBlockedReason = null;
   sessionState.lastSkippedReason = null;
+  sessionState.lastStuckStep = null;
   sessionState.proseBaselineCount = 0;
   sessionState.tabBaselineExternalIds = [];
   sessionState.steps = [];
@@ -87,12 +97,12 @@ export function startNewTask(prompt: string): string {
 /**
  * Record a task's terminal state. The `reason` parameter is interpreted
  * based on `terminalStatus`: stored as lastBlockedReason for blocked
- * outcomes, lastSkippedReason for skipped outcomes, and ignored for
- * completed outcomes.
+ * outcomes, lastSkippedReason for skipped, lastStuckStep for stuck, and
+ * ignored for completed outcomes.
  */
 export function completeTask(
   response: string,
-  terminalStatus: "completed" | "blocked" | "skipped" = "completed",
+  terminalStatus: "completed" | "blocked" | "skipped" | "stuck" = "completed",
   reason: string | null = null,
 ): void {
   sessionState.lastResponse = response;
@@ -100,6 +110,7 @@ export function completeTask(
   sessionState.lastTerminalStatus = terminalStatus;
   sessionState.lastBlockedReason = terminalStatus === "blocked" ? reason : null;
   sessionState.lastSkippedReason = terminalStatus === "skipped" ? reason : null;
+  sessionState.lastStuckStep = terminalStatus === "stuck" ? reason : null;
   sessionState.isActive = false;
 }
 
@@ -157,7 +168,8 @@ export function readCachedResponse(now: number = Date.now()): CachedResponse | n
   if (
     sessionState.lastTerminalStatus !== "completed" &&
     sessionState.lastTerminalStatus !== "blocked" &&
-    sessionState.lastTerminalStatus !== "skipped"
+    sessionState.lastTerminalStatus !== "skipped" &&
+    sessionState.lastTerminalStatus !== "stuck"
   ) {
     return null;
   }
@@ -168,6 +180,7 @@ export function readCachedResponse(now: number = Date.now()): CachedResponse | n
     sessionState.lastTerminalStatus = null;
     sessionState.lastBlockedReason = null;
     sessionState.lastSkippedReason = null;
+    sessionState.lastStuckStep = null;
     return null;
   }
   return {
@@ -176,5 +189,6 @@ export function readCachedResponse(now: number = Date.now()): CachedResponse | n
     terminalStatus: sessionState.lastTerminalStatus,
     blockedReason: sessionState.lastBlockedReason,
     skippedReason: sessionState.lastSkippedReason,
+    stuckStep: sessionState.lastStuckStep,
   };
 }

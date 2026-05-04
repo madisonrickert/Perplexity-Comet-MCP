@@ -20,6 +20,7 @@ function resetSessionState(): void {
   sessionState.lastTerminalStatus = null;
   sessionState.lastBlockedReason = null;
   sessionState.lastSkippedReason = null;
+  sessionState.lastStuckStep = null;
   sessionState.proseBaselineCount = 0;
   sessionState.tabBaselineExternalIds = [];
   sessionState.steps = [];
@@ -138,6 +139,29 @@ describe("completeTask", () => {
     // displaying one don't leak the other.
     expect(sessionState.lastBlockedReason).toBeNull();
     expect(sessionState.isActive).toBe(false);
+  });
+
+  it("records 'stuck' terminalStatus and stores the step in lastStuckStep", () => {
+    startNewTask("a prompt");
+    completeTask("[stuck message]", "stuck", "Searching for item 10");
+
+    expect(sessionState.lastTerminalStatus).toBe("stuck");
+    expect(sessionState.lastStuckStep).toBe("Searching for item 10");
+    // Stuck step is stored separately from skipped/blocked reasons so a
+    // stuck task never claims a login wall fired.
+    expect(sessionState.lastBlockedReason).toBeNull();
+    expect(sessionState.lastSkippedReason).toBeNull();
+    expect(sessionState.isActive).toBe(false);
+  });
+
+  it("clears all terminal-reason fields when starting a new task", () => {
+    sessionState.lastTerminalStatus = "stuck";
+    sessionState.lastStuckStep = "old step";
+
+    startNewTask("a fresh prompt");
+
+    expect(sessionState.lastTerminalStatus).toBeNull();
+    expect(sessionState.lastStuckStep).toBeNull();
   });
 });
 
