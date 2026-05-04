@@ -88,6 +88,25 @@ export function isSessionStale(): boolean {
   return Date.now() - sessionState.taskStartTime > 5 * 60 * 1000;
 }
 
+export interface ActiveTaskCollision {
+  currentTaskId: string | null;
+  elapsedSec: number;
+}
+
+/**
+ * Returns information about an in-flight task that would collide with a new
+ * comet_ask call, or null if no collision exists. Stale sessions (>5 min)
+ * are treated as non-colliding so a forgotten task can't permanently block
+ * the tool.
+ */
+export function getActiveTaskCollision(): ActiveTaskCollision | null {
+  if (!sessionState.isActive || isSessionStale()) return null;
+  const elapsedSec = sessionState.taskStartTime
+    ? Math.round((Date.now() - sessionState.taskStartTime) / 1000)
+    : 0;
+  return { currentTaskId: sessionState.currentTaskId, elapsedSec };
+}
+
 /**
  * Read the cached response from a finished task, if it exists and hasn't
  * exceeded RESPONSE_CACHE_TTL_MS. Returns null when there's nothing cached,

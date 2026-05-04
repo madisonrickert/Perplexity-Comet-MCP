@@ -19,6 +19,7 @@ import {
   completeTask,
   isSessionStale,
   readCachedResponse,
+  getActiveTaskCollision,
 } from "./session-state.js";
 import { readProseState, type ProseState } from "./page-scripts.js";
 import {
@@ -202,6 +203,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // Validate prompt
         if (!prompt || prompt.trim().length === 0) {
           return { content: [{ type: "text", text: "Error: prompt cannot be empty" }] };
+        }
+
+        // Reject overlapping calls. Without this guard a second comet_ask
+        // would clobber the first task's session state and type its prompt
+        // into a still-locked input box, leaving both tasks in a broken
+        // state. Stale sessions (>5 min) fall through so a forgotten task
+        // doesn't permanently block the tool.
+        const collision = getActiveTaskCollision();
+        if (collision) {
+          return {
+            content: [{
+              type: "text",
+              text: `Error: another task is already in progress (task ${collision.currentTaskId}, started ${collision.elapsedSec}s ago). Call comet_stop or comet_poll first.`,
+            }],
+            isError: true,
+          };
         }
 
         // If context is provided, prepend it to the prompt

@@ -7,6 +7,7 @@ import {
   generateTaskId,
   readCachedResponse,
   RESPONSE_CACHE_TTL_MS,
+  getActiveTaskCollision,
 } from "../../src/session-state.js";
 
 function resetSessionState(): void {
@@ -179,6 +180,47 @@ describe("readCachedResponse", () => {
     expect(cached).not.toBeNull();
     expect(cached!.terminalStatus).toBe("blocked");
     expect(cached!.blockedReason).toBe("login_required");
+  });
+});
+
+describe("getActiveTaskCollision", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns null when no task is active", () => {
+    expect(getActiveTaskCollision()).toBeNull();
+  });
+
+  it("returns task id and elapsedSec while a task is active and fresh", () => {
+    const taskId = startNewTask("a prompt");
+    vi.advanceTimersByTime(7 * 1000);
+
+    const collision = getActiveTaskCollision();
+    expect(collision).not.toBeNull();
+    expect(collision!.currentTaskId).toBe(taskId);
+    expect(collision!.elapsedSec).toBe(7);
+  });
+
+  it("returns null after completeTask runs", () => {
+    startNewTask("a prompt");
+    completeTask("the answer");
+
+    expect(getActiveTaskCollision()).toBeNull();
+  });
+
+  it("returns null once the active task has gone stale (>5 min)", () => {
+    startNewTask("an old prompt");
+    vi.advanceTimersByTime(5 * 60 * 1000 + 1);
+
+    // A forgotten/abandoned task shouldn't permanently block new comet_ask
+    // calls — the staleness check lets the next call proceed.
+    expect(getActiveTaskCollision()).toBeNull();
   });
 });
 
