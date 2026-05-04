@@ -20,6 +20,7 @@ import {
   isSessionStale,
   readCachedResponse,
   getActiveTaskCollision,
+  countTabsOpenedSinceBaseline,
 } from "./session-state.js";
 import { readProseState, type ProseState } from "./page-scripts.js";
 import {
@@ -91,8 +92,8 @@ const TOOLS: Tool[] = [
       properties: {
         action: {
           type: "string",
-          enum: ["list", "switch", "close"],
-          description: "Action to perform: 'list' (default) shows all tabs, 'switch' activates a tab, 'close' closes a tab",
+          enum: ["list", "switch", "close", "close-others"],
+          description: "Action to perform: 'list' (default) shows all tabs, 'switch' activates a tab, 'close' closes a single tab, 'close-others' closes all external tabs except optionally one keep-target",
         },
         domain: {
           type: "string",
@@ -100,7 +101,11 @@ const TOOLS: Tool[] = [
         },
         tabId: {
           type: "string",
-          description: "For switch/close: specific tab ID",
+          description: "For switch/close/close-others: specific tab ID. For close-others, this is the keep-target.",
+        },
+        url_substring: {
+          type: "string",
+          description: "For close-others: URL substring of the tab to preserve (alternative to tabId).",
         },
       },
     },
@@ -322,6 +327,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
             .filter(tab => tab.purpose !== 'main')
             .map(tab => tab.id)
         );
+        // Mirror to sessionState so comet_poll can compute a tabsOpened
+        // delta for callers monitoring tab proliferation during the task.
+        sessionState.tabBaselineExternalIds = [...baselineExternalTabIds];
         let blockedReason: string | null = null;
         let blockedMessage: string | null = null;
 
@@ -767,6 +775,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           output += `Current: ${status.currentStep}\n`;
         }
 
+        // Surface tab-proliferation pressure during the active task — useful
+        // for callers deciding when to call comet_tabs action=close-others.
+        // Best-effort: tab list errors fall through silently rather than
+        // failing the poll.
+        try {
+          const currentExternalTabIds = (await cometClient.getTabContexts())
+            .filter(tab => tab.purpose !== 'main')
+            .map(tab => tab.id);
+          const tabsOpened = countTabsOpenedSinceBaseline(currentExternalTabIds);
+          if (tabsOpened > 0) {
+            output += `Tabs opened during task: ${tabsOpened}\n`;
+          }
+        } catch {
+          // ignore tab-listing transient failures
+        }
+
         // Combine session steps with current status steps
         const allSteps = [...new Set([...sessionState.steps, ...status.steps])];
         if (allSteps.length > 0) {
@@ -851,8 +875,51 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
             return { content: [{ type: "text", text: "Specify domain or tabId to close" }], isError: true };
           }
 
+          case 'close-others': {
+            // Close every external tab except (a) the main Perplexity tab
+            // and (b) optionally one named keep-target. Lets a caller prune
+            // sibling tabs that the agent spawned during a session without
+            // having to enumerate them by URL.
+            const urlSubstring = (args?.url_substring as string | undefined) ||
+              (args?.url as string | undefined);
+            const tabs = await cometClient.getTabContexts();
+            let keepTabId: string | null = null;
+            if (tabId) {
+              keepTabId = tabId;
+            } else if (urlSubstring) {
+              const matched = tabs.find(t => t.url.includes(urlSubstring));
+              if (matched) keepTabId = matched.id;
+            }
+
+            let closed = 0;
+            let preserved = 0;
+            const errors: string[] = [];
+            for (const tab of tabs) {
+              if (tab.purpose === 'main') {
+                preserved++;
+                continue;
+              }
+              if (keepTabId && tab.id === keepTabId) {
+                preserved++;
+                continue;
+              }
+              try {
+                const success = await cometClient.closeTab(tab.id);
+                if (success) closed++;
+                else errors.push(tab.id);
+              } catch (e) {
+                errors.push(`${tab.id}: ${e instanceof Error ? e.message : String(e)}`);
+              }
+            }
+
+            const lines = [`Closed ${closed} tab(s); preserved ${preserved} tab(s).`];
+            if (keepTabId) lines.push(`Preserved keep-target: ${keepTabId}`);
+            if (errors.length > 0) lines.push(`Errors: ${errors.join(', ')}`);
+            return { content: [{ type: "text", text: lines.join('\n') }] };
+          }
+
           default:
-            return { content: [{ type: "text", text: `Unknown action: ${action}. Use: list, switch, close` }], isError: true };
+            return { content: [{ type: "text", text: `Unknown action: ${action}. Use: list, switch, close, close-others` }], isError: true };
         }
       }
 

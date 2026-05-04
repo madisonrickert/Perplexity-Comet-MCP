@@ -8,6 +8,7 @@ import {
   readCachedResponse,
   RESPONSE_CACHE_TTL_MS,
   getActiveTaskCollision,
+  countTabsOpenedSinceBaseline,
 } from "../../src/session-state.js";
 
 function resetSessionState(): void {
@@ -20,6 +21,7 @@ function resetSessionState(): void {
   sessionState.lastBlockedReason = null;
   sessionState.lastSkippedReason = null;
   sessionState.proseBaselineCount = 0;
+  sessionState.tabBaselineExternalIds = [];
   sessionState.steps = [];
   sessionState.isActive = false;
 }
@@ -193,6 +195,35 @@ describe("readCachedResponse", () => {
     expect(cached).not.toBeNull();
     expect(cached!.terminalStatus).toBe("blocked");
     expect(cached!.blockedReason).toBe("login_required");
+  });
+});
+
+describe("countTabsOpenedSinceBaseline", () => {
+  it("returns 0 when current tabs match the baseline exactly", () => {
+    sessionState.tabBaselineExternalIds = ["A", "B"];
+    expect(countTabsOpenedSinceBaseline(["A", "B"])).toBe(0);
+  });
+
+  it("returns the number of new tab IDs that didn't exist at task start", () => {
+    sessionState.tabBaselineExternalIds = ["A"];
+    expect(countTabsOpenedSinceBaseline(["A", "B", "C"])).toBe(2);
+  });
+
+  it("does not count tabs that disappeared (only spawn delta matters here)", () => {
+    sessionState.tabBaselineExternalIds = ["A", "B"];
+    // Tab A was closed; the remaining tab matches baseline. No new tabs.
+    expect(countTabsOpenedSinceBaseline(["B"])).toBe(0);
+  });
+
+  it("treats every current tab as new when baseline is empty", () => {
+    sessionState.tabBaselineExternalIds = [];
+    expect(countTabsOpenedSinceBaseline(["X", "Y", "Z"])).toBe(3);
+  });
+
+  it("clears the baseline when startNewTask runs (tabsOpened resets per task)", () => {
+    sessionState.tabBaselineExternalIds = ["A", "B", "C"];
+    startNewTask("a fresh prompt");
+    expect(sessionState.tabBaselineExternalIds).toEqual([]);
   });
 });
 
