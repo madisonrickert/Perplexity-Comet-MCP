@@ -28,6 +28,13 @@ export interface SessionState {
    * left over from a previous task's answer surfaces as the new answer.
    */
   proseBaselineCount: number;
+  /**
+   * IDs of all external (non-main) browser tabs that existed at task start.
+   * Used by comet_poll to surface a tabsOpened delta (current count minus
+   * tabs not in this set) so callers can see how many tabs the agent has
+   * spawned during the active task.
+   */
+  tabBaselineExternalIds: string[];
   steps: string[];
   isActive: boolean;
 }
@@ -50,6 +57,7 @@ export const sessionState: SessionState = {
   lastBlockedReason: null,
   lastSkippedReason: null,
   proseBaselineCount: 0,
+  tabBaselineExternalIds: [],
   steps: [],
   isActive: false,
 };
@@ -69,6 +77,7 @@ export function startNewTask(prompt: string): string {
   sessionState.lastBlockedReason = null;
   sessionState.lastSkippedReason = null;
   sessionState.proseBaselineCount = 0;
+  sessionState.tabBaselineExternalIds = [];
   sessionState.steps = [];
   sessionState.isActive = true;
   cometAI.resetStabilityTracking();
@@ -98,6 +107,20 @@ export function isSessionStale(): boolean {
   if (!sessionState.taskStartTime) return true;
   // Consider session stale if no activity for 5 minutes
   return Date.now() - sessionState.taskStartTime > 5 * 60 * 1000;
+}
+
+/**
+ * Count tabs that exist now but didn't at task start. Used by comet_poll
+ * to surface a "tabs the agent opened during this task" delta — useful
+ * for callers who care about tab proliferation during agentic browsing.
+ */
+export function countTabsOpenedSinceBaseline(currentExternalTabIds: Iterable<string>): number {
+  const baseline = new Set(sessionState.tabBaselineExternalIds);
+  let opened = 0;
+  for (const id of currentExternalTabIds) {
+    if (!baseline.has(id)) opened++;
+  }
+  return opened;
 }
 
 export interface ActiveTaskCollision {
