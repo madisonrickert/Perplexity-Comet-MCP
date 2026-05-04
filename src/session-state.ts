@@ -42,6 +42,13 @@ export interface SessionState {
    * spawned during the active task.
    */
   tabBaselineExternalIds: string[];
+  /**
+   * cdpClient.reconnectCount at task start. comet_poll subtracts this from
+   * the live counter so callers see "reconnects during this task" rather
+   * than the lifetime total. High deltas hint that transport flakiness is
+   * the reason a task feels slow.
+   */
+  reconnectBaseline: number;
   steps: string[];
   isActive: boolean;
 }
@@ -67,6 +74,7 @@ export const sessionState: SessionState = {
   lastStuckStep: null,
   proseBaselineCount: 0,
   tabBaselineExternalIds: [],
+  reconnectBaseline: 0,
   steps: [],
   isActive: false,
 };
@@ -88,6 +96,7 @@ export function startNewTask(prompt: string): string {
   sessionState.lastStuckStep = null;
   sessionState.proseBaselineCount = 0;
   sessionState.tabBaselineExternalIds = [];
+  sessionState.reconnectBaseline = 0;
   sessionState.steps = [];
   sessionState.isActive = true;
   cometAI.resetStabilityTracking();

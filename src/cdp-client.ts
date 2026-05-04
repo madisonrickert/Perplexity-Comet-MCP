@@ -210,6 +210,14 @@ export class CometCDPClient {
   private lastTargetId: string | undefined;
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 10;
+  /**
+   * Cumulative reconnect counter across the lifetime of this CDP client.
+   * Unlike `reconnectAttempts` (which resets to 0 on a successful op for
+   * the exponential-backoff loop), this only ever increments. Surfaced in
+   * comet_poll output so callers can tell when transport flakiness is the
+   * reason a task feels slow.
+   */
+  private reconnectsSinceStart: number = 0;
   private isReconnecting: boolean = false;
   private connectionCheckInterval: NodeJS.Timeout | null = null;
   private lastHealthCheck: number = 0;
@@ -392,9 +400,17 @@ export class CometCDPClient {
   }
 
   /**
+   * Cumulative reconnects since this client was constructed. Read-only.
+   */
+  get reconnectCount(): number {
+    return this.reconnectsSinceStart;
+  }
+
+  /**
    * Reconnect to the last connected tab
    */
   async reconnect(): Promise<string> {
+    this.reconnectsSinceStart++;
     if (this.client) {
       try { await this.client.close(); } catch { /* ignore */ }
     }

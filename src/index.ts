@@ -335,6 +335,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         // Mirror to sessionState so comet_poll can compute a tabsOpened
         // delta for callers monitoring tab proliferation during the task.
         sessionState.tabBaselineExternalIds = [...baselineExternalTabIds];
+        // Snapshot the lifetime reconnect counter so callers can see how
+        // much transport flakiness this specific task incurred.
+        sessionState.reconnectBaseline = cometClient.reconnectCount;
         let blockedReason: string | null = null;
         let blockedMessage: string | null = null;
 
@@ -827,6 +830,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           }
         } catch {
           // ignore tab-listing transient failures
+        }
+
+        // Reconnect delta — high values hint that transport flakiness, not
+        // the agent itself, is making this task feel slow.
+        const reconnects = cometClient.reconnectCount - sessionState.reconnectBaseline;
+        if (reconnects > 0) {
+          output += `CDP reconnects during task: ${reconnects}\n`;
         }
 
         // Combine session steps with current status steps

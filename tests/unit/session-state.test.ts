@@ -23,6 +23,7 @@ function resetSessionState(): void {
   sessionState.lastStuckStep = null;
   sessionState.proseBaselineCount = 0;
   sessionState.tabBaselineExternalIds = [];
+  sessionState.reconnectBaseline = 0;
   sessionState.steps = [];
   sessionState.isActive = false;
 }
@@ -90,6 +91,14 @@ describe("startNewTask", () => {
     // The handler is responsible for updating this to the live DOM count
     // immediately after; startNewTask itself starts from a clean baseline.
     expect(sessionState.proseBaselineCount).toBe(0);
+  });
+
+  it("resets reconnectBaseline to 0 for a fresh task", () => {
+    sessionState.reconnectBaseline = 3;
+
+    startNewTask("a fresh prompt");
+
+    expect(sessionState.reconnectBaseline).toBe(0);
   });
 
   it("returns a task id that matches the format from generateTaskId", () => {
