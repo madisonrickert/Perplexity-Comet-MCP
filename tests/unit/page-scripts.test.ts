@@ -147,3 +147,51 @@ describe("extractAgentStatus stop-button refinement", () => {
     expect(result.status).toBe("working");
   });
 });
+
+describe("extractAgentStatus prose-first response extraction", () => {
+  it("strips inline citation chip text from the prose response", () => {
+    document.body.innerHTML = `
+      <main>
+        <div class="prose">
+          <p>Photosynthesis converts light energy into chemical energy<span class="citation inline">+1</span>.</p>
+        </div>
+      </main>
+    `;
+
+    const result = extractAgentStatus();
+    expect(result.response).not.toContain("+1");
+    expect(result.response).toContain("Photosynthesis converts light energy into chemical energy");
+  });
+
+  it("strips multiple chip-like descendants (anchors, buttons, citation spans)", () => {
+    document.body.innerHTML = `
+      <main>
+        <div class="prose">
+          <p>Plants use chlorophyll<a href="#x">stackoverflow</a> to absorb light<button>copy</button> for ATP synthesis<span class="source">nodejs</span>.</p>
+        </div>
+      </main>
+    `;
+
+    const result = extractAgentStatus();
+    expect(result.response).not.toContain("stackoverflow");
+    expect(result.response).not.toContain("copy");
+    expect(result.response).not.toContain("nodejs");
+    expect(result.response).toContain("Plants use chlorophyll");
+    expect(result.response).toContain("ATP synthesis");
+  });
+
+  it("falls back to bodyText marker extraction when no prose container exists", () => {
+    // No <div class="prose"> — Strategy 1 finds nothing, Strategy 2 (marker-based) takes over.
+    document.body.innerHTML = `
+      <main>
+        <p>3 steps completed</p>
+        <p>The answer to your question is forty-two.</p>
+        <p>Ask a follow-up</p>
+      </main>
+    `;
+
+    const result = extractAgentStatus();
+    expect(result.response).toContain("forty-two");
+    expect(result.response).not.toContain("Ask a follow-up");
+  });
+});
