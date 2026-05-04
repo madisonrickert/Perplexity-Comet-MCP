@@ -29,6 +29,7 @@ import {
   RESPONSE_IDLE_MS,
   RESPONSE_MIN_LEN,
 } from "./cdp-timeouts.js";
+import { createProgressEmitter, formatProgressMessage } from "./streaming.js";
 
 const TOOLS: Tool[] = [
   {
@@ -50,7 +51,7 @@ const TOOLS: Tool[] = [
   },
   {
     name: "comet_ask",
-    description: "Send a prompt to Comet/Perplexity and wait for the complete response (blocking). Ideal for tasks requiring real browser interaction (login walls, dynamic content, filling forms) or deep research with agentic browsing.",
+    description: "Send a prompt to Comet/Perplexity and wait for the complete response (blocking). Ideal for tasks requiring real browser interaction (login walls, dynamic content, filling forms) or deep research with agentic browsing. Supports MCP progress notifications: include a progressToken in _meta to receive notifications/progress updates per polling iteration with the current step and a truncated partial response, removing the need to call comet_poll between updates.",
     inputSchema: {
       type: "object",
         properties: {
@@ -149,7 +150,7 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const { name, arguments: args } = request.params;
 
   try {
@@ -199,6 +200,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const maxTimeout = (args?.timeout as number) || 120000; // Max 2 minutes safety net
         const newChat = (args?.newChat as boolean) || false;
         const tabPolicy = ((args?.tabPolicy as string) || 'preserve') as 'preserve' | 'cleanup' | 'cleanup_on_blocked';
+
+        // Streaming progress notifications. The client opts in by including
+        // a progressToken in the request's _meta; without one, the emitter
+        // is null and we skip emit calls entirely. Notifications never
+        // replace the final tool result — they're purely additive UX.
+        const progressEmitter = createProgressEmitter(
+          extra._meta?.progressToken,
+          (notification) => extra.sendNotification(notification),
+        );
+        let pollIteration = 0;
 
         // Validate prompt
         if (!prompt || prompt.trim().length === 0) {
@@ -499,6 +510,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
               const status = await cometAI.getAgentStatus({ proseWatermark: sessionState.proseBaselineCount });
               consecutiveErrors = 0;
+
+              if (progressEmitter) {
+                pollIteration += 1;
+                await progressEmitter.emit({
+                  progress: pollIteration,
+                  message: formatProgressMessage({
+                    status: status.status,
+                    currentStep: status.currentStep,
+                    response: status.response,
+                    agentBrowsingUrl: status.agentBrowsingUrl,
+                  }),
+                });
+              }
 
               if (status.response && status.response.length >= RESPONSE_MIN_LEN) {
                 lastKnownResponse = status.response;
