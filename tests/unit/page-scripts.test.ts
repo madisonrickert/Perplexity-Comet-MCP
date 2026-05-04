@@ -195,3 +195,45 @@ describe("extractAgentStatus prose-first response extraction", () => {
     expect(result.response).not.toContain("Ask a follow-up");
   });
 });
+
+describe("extractAgentStatus blocked-state detection", () => {
+  it("returns status='blocked' when the logged-out browser banner is present", () => {
+    document.body.innerHTML = `
+      <div>Comet Assistant can't use the browser when logged out</div>
+      <button aria-label="Sign in">Sign in</button>
+    `;
+
+    const result = extractAgentStatus();
+    expect(result.status).toBe("blocked");
+    expect(result.blockedReason).toBe("login_required");
+    expect(result.browserAutomationAvailable).toBe(false);
+    expect(result.blockedMessage).toMatch(/logged out|sign in/i);
+  });
+
+  it("returns status='blocked' when an unlock-capabilities banner pairs with a visible login dialog", () => {
+    document.body.innerHTML = `
+      <div>Log in to unlock full capabilities</div>
+      <div role="dialog">
+        <h2>Welcome back</h2>
+        <button>Continue with Google</button>
+      </div>
+    `;
+    const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+    markVisible(dialog);
+
+    const result = extractAgentStatus();
+    expect(result.status).toBe("blocked");
+    expect(result.blockedReason).toBe("login_required");
+    expect(result.browserAutomationAvailable).toBe(false);
+  });
+
+  it("reports browserAutomationAvailable=true and no blocked fields on a clean page", () => {
+    document.body.innerHTML = `<div class="prose">Just an answer with no login prompts.</div>`;
+
+    const result = extractAgentStatus();
+    expect(result.status).not.toBe("blocked");
+    expect(result.browserAutomationAvailable).toBe(true);
+    expect(result.blockedReason).toBeUndefined();
+    expect(result.blockedMessage).toBeUndefined();
+  });
+});

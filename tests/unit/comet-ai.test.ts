@@ -135,3 +135,59 @@ describe("CometAI.getAgentStatus", () => {
     expect(js.endsWith(")()")).toBe(true);
   });
 });
+
+describe("CometAI.getBrowserBlockState", () => {
+  it("propagates a canned login_required block-state from safeEvaluate", async () => {
+    const fake = new FakeCdpClient();
+    fake.setEvaluateResult({
+      blocked: true,
+      blockedReason: "login_required",
+      blockedMessage: "Comet browser automation is unavailable because the browser is logged out. Sign in to unlock full capabilities.",
+    });
+
+    const ai = new CometAI(fake);
+    const state = await ai.getBrowserBlockState();
+
+    expect(state.blocked).toBe(true);
+    expect(state.blockedReason).toBe("login_required");
+    expect(state.blockedMessage).toMatch(/logged out|sign in/i);
+  });
+
+  it("propagates a quota_exceeded block-state", async () => {
+    const fake = new FakeCdpClient();
+    fake.setEvaluateResult({
+      blocked: true,
+      blockedReason: "quota_exceeded",
+      blockedMessage: "Perplexity Pro quota has been reached. Agentic features are unavailable until the quota resets.",
+    });
+
+    const ai = new CometAI(fake);
+    const state = await ai.getBrowserBlockState();
+
+    expect(state.blocked).toBe(true);
+    expect(state.blockedReason).toBe("quota_exceeded");
+    expect(state.blockedMessage).toMatch(/quota/i);
+  });
+
+  it("returns blocked=false when nothing on the page indicates a block", async () => {
+    const fake = new FakeCdpClient();
+    fake.setEvaluateResult({ blocked: false });
+
+    const ai = new CometAI(fake);
+    const state = await ai.getBrowserBlockState();
+
+    expect(state.blocked).toBe(false);
+    expect(state.blockedReason).toBeUndefined();
+    expect(state.blockedMessage).toBeUndefined();
+  });
+
+  it("defensively defaults to {blocked: false} when evaluate returns undefined", async () => {
+    const fake = new FakeCdpClient();
+    fake.setEvaluateResult(undefined);
+
+    const ai = new CometAI(fake);
+    const state = await ai.getBrowserBlockState();
+
+    expect(state.blocked).toBe(false);
+  });
+});

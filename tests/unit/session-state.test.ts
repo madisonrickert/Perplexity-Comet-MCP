@@ -13,6 +13,8 @@ function resetSessionState(): void {
   sessionState.lastPrompt = null;
   sessionState.lastResponse = null;
   sessionState.lastResponseTime = null;
+  sessionState.lastTerminalStatus = null;
+  sessionState.lastBlockedReason = null;
   sessionState.steps = [];
   sessionState.isActive = false;
 }
@@ -62,6 +64,16 @@ describe("startNewTask", () => {
     expect(sessionState.steps).toEqual([]);
   });
 
+  it("clears prior lastTerminalStatus and lastBlockedReason from a previous task", () => {
+    sessionState.lastTerminalStatus = "blocked";
+    sessionState.lastBlockedReason = "login_required";
+
+    startNewTask("a fresh prompt");
+
+    expect(sessionState.lastTerminalStatus).toBeNull();
+    expect(sessionState.lastBlockedReason).toBeNull();
+  });
+
   it("returns a task id that matches the format from generateTaskId", () => {
     const taskId = startNewTask("any");
     expect(taskId).toMatch(/^task_\d+_[0-9a-z]+$/);
@@ -81,6 +93,22 @@ describe("completeTask", () => {
     expect(sessionState.isActive).toBe(false);
     expect(sessionState.lastResponseTime).toBeGreaterThanOrEqual(before);
     expect(sessionState.lastResponseTime).toBeLessThanOrEqual(after);
+  });
+
+  it("defaults to terminalStatus 'completed' with null blockedReason", () => {
+    startNewTask("a prompt");
+    completeTask("the answer");
+    expect(sessionState.lastTerminalStatus).toBe("completed");
+    expect(sessionState.lastBlockedReason).toBeNull();
+  });
+
+  it("records 'blocked' terminalStatus and an explicit blockedReason when supplied", () => {
+    startNewTask("a prompt");
+    completeTask("[error message]", "blocked", "login_required");
+    expect(sessionState.lastTerminalStatus).toBe("blocked");
+    expect(sessionState.lastBlockedReason).toBe("login_required");
+    expect(sessionState.isActive).toBe(false);
+    expect(sessionState.lastResponse).toBe("[error message]");
   });
 });
 
