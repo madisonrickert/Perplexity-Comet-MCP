@@ -767,6 +767,15 @@ export class CometCDPClient {
       const task = tab.taskId ? ` (task: ${tab.taskId})` : "";
       const summary = tab.contentSummary ? ` - ${tab.contentSummary}` : "";
       lines.push(`  • ${tab.purpose.toUpperCase()}: ${tab.domain}${active}${task}${summary}`);
+      // Page title disambiguates tabs that share a domain or URL prefix
+      // (e.g. multiple amazon.com tabs in different storefront states).
+      // Only emit a title line when there's something useful to show.
+      if (tab.title && tab.title.trim().length > 0 && tab.title !== tab.url) {
+        const titleTrimmed = tab.title.length > 80
+          ? tab.title.substring(0, 80) + '…'
+          : tab.title;
+        lines.push(`    Title: ${titleTrimmed}`);
+      }
       lines.push(`    URL: ${tab.url.substring(0, 80)}${tab.url.length > 80 ? '...' : ''}`);
     }
 
