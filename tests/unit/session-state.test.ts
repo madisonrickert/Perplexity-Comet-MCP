@@ -17,6 +17,7 @@ function resetSessionState(): void {
   sessionState.lastResponseTime = null;
   sessionState.lastTerminalStatus = null;
   sessionState.lastBlockedReason = null;
+  sessionState.proseBaselineCount = 0;
   sessionState.steps = [];
   sessionState.isActive = false;
 }
@@ -74,6 +75,16 @@ describe("startNewTask", () => {
 
     expect(sessionState.lastTerminalStatus).toBeNull();
     expect(sessionState.lastBlockedReason).toBeNull();
+  });
+
+  it("resets proseBaselineCount to 0 for a fresh task", () => {
+    sessionState.proseBaselineCount = 7;
+
+    startNewTask("a fresh prompt");
+
+    // The handler is responsible for updating this to the live DOM count
+    // immediately after; startNewTask itself starts from a clean baseline.
+    expect(sessionState.proseBaselineCount).toBe(0);
   });
 
   it("returns a task id that matches the format from generateTaskId", () => {

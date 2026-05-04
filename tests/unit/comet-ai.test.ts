@@ -131,8 +131,26 @@ describe("CometAI.getAgentStatus", () => {
     expect(fake.evaluateCalls.length).toBe(1);
     const js = fake.evaluateCalls[0];
     expect(js).toContain("function extractAgentStatus");
-    // Wrapped as an immediately-invoked function expression
-    expect(js.endsWith(")()")).toBe(true);
+    // The IIFE now passes an options object so extractAgentStatus can read
+    // the prose watermark. Default to 0 when no watermark is supplied.
+    expect(js).toMatch(/\)\(\{"proseWatermark":\s*0\}\)$/);
+  });
+
+  it("forwards proseWatermark into the page-eval IIFE", async () => {
+    const fake = new FakeCdpClient();
+    fake.setEvaluateResult({
+      status: "idle",
+      steps: [],
+      currentStep: "",
+      response: "",
+      hasStopButton: false,
+    });
+
+    const ai = new CometAI(fake);
+    await ai.getAgentStatus({ proseWatermark: 5 });
+
+    const js = fake.evaluateCalls[0];
+    expect(js).toMatch(/\)\(\{"proseWatermark":\s*5\}\)$/);
   });
 });
 

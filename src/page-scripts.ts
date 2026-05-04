@@ -39,7 +39,19 @@ export interface AgentStatusResult {
   browserAutomationAvailable: boolean;
 }
 
-export function extractAgentStatus(): AgentStatusResult {
+export interface ExtractAgentStatusOptions {
+  /**
+   * Number of `[class*="prose"]` elements that existed in the DOM before the
+   * current task's prompt was sent. Prose blocks at index < watermark belong
+   * to a previous answer and are excluded from response extraction. Defaults
+   * to 0 (consider every prose block) so callers that don't track watermarks
+   * still work.
+   */
+  proseWatermark?: number;
+}
+
+export function extractAgentStatus(options: ExtractAgentStatusOptions = {}): AgentStatusResult {
+  const proseWatermark = Math.max(0, options.proseWatermark ?? 0);
   const body = document.body.innerText;
 
   // Stop-button detection. Excludes modal dismiss/login buttons and requires
@@ -138,7 +150,11 @@ export function extractAgentStatus(): AgentStatusResult {
 
   // Prose-content threshold lowered to >0 so short answers (e.g. "2 + 2 = 4.")
   // are detected. Sidebar/UI text is filtered out by prefix.
-  const proseEls = [...document.querySelectorAll('[class*="prose"]')] as HTMLElement[];
+  // Apply the watermark up-front: prose blocks that existed before this task's
+  // prompt was sent belong to a previous answer and must not influence the
+  // status decision or the response extraction below.
+  const allProseEls = [...document.querySelectorAll('[class*="prose"]')] as HTMLElement[];
+  const proseEls = allProseEls.slice(proseWatermark);
   const hasProseContent = proseEls.some((el) => {
     const text = el.innerText.trim();
     return (
@@ -220,7 +236,11 @@ export function extractAgentStatus(): AgentStatusResult {
         }
         return text.replace(/\n{3,}/g, "\n\n").trim();
       };
-      const proseEls = [...mainContent.querySelectorAll('[class*="prose"]')] as HTMLElement[];
+      // Use the watermark-filtered, mainContent-scoped subset so we never
+      // re-extract a previous task's answer from leftover prose.
+      const proseEls = allProseEls
+        .slice(proseWatermark)
+        .filter((el) => mainContent.contains(el));
       const validTexts = proseEls
         .filter((el) => {
           if (el.closest("nav, aside, header, footer, form, [contenteditable]")) return false;

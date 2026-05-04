@@ -362,6 +362,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // Capture old response state BEFORE sending prompt (for follow-up detection)
           const oldStateResult = await cometClient.evaluate(`(${readProseState.toString()})()`);
           const oldState = oldStateResult.result.value as ProseState;
+          // Watermark prose blocks that already exist so the polling loop and
+          // any concurrent comet_poll skip them when extracting the response.
+          sessionState.proseBaselineCount = oldState.count;
 
           await cometAI.sendPrompt(prompt);
 
@@ -477,7 +480,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 }
               }
 
-              const status = await cometAI.getAgentStatus();
+              const status = await cometAI.getAgentStatus({ proseWatermark: sessionState.proseBaselineCount });
               consecutiveErrors = 0;
 
               if (status.response && status.response.length >= RESPONSE_MIN_LEN) {
@@ -628,7 +631,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         // still get a useful response.
         let status: Awaited<ReturnType<typeof cometAI.getAgentStatus>>;
         try {
-          status = await cometAI.getAgentStatus();
+          status = await cometAI.getAgentStatus({ proseWatermark: sessionState.proseBaselineCount });
         } catch (e) {
           if (!(e instanceof TimedOutError) && !(e instanceof DisconnectedError)) throw e;
           status = {

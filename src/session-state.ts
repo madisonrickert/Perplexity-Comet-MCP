@@ -19,6 +19,13 @@ export interface SessionState {
   lastTerminalStatus: "completed" | "blocked" | null;
   /** Reason a task was blocked (e.g. login wall). `null` for non-blocked outcomes. */
   lastBlockedReason: string | null;
+  /**
+   * Number of `[class*="prose"]` elements present in the DOM at task start.
+   * Used as a watermark so getAgentStatus only considers prose blocks
+   * generated *after* this task's prompt was sent — without it, the prose
+   * left over from a previous task's answer surfaces as the new answer.
+   */
+  proseBaselineCount: number;
   steps: string[];
   isActive: boolean;
 }
@@ -38,6 +45,7 @@ export const sessionState: SessionState = {
   lastResponseTime: null,
   lastTerminalStatus: null,
   lastBlockedReason: null,
+  proseBaselineCount: 0,
   steps: [],
   isActive: false,
 };
@@ -55,6 +63,7 @@ export function startNewTask(prompt: string): string {
   sessionState.lastResponseTime = null;
   sessionState.lastTerminalStatus = null;
   sessionState.lastBlockedReason = null;
+  sessionState.proseBaselineCount = 0;
   sessionState.steps = [];
   sessionState.isActive = true;
   cometAI.resetStabilityTracking();
