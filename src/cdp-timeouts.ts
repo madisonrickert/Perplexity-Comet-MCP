@@ -34,3 +34,13 @@ export const RESPONSE_IDLE_MS = 3000;
  * legitimately. Stability + stop-button-gone are the real completion signals.
  */
 export const RESPONSE_MIN_LEN = 1;
+
+/**
+ * Failsafe ceiling for "no progress at all" inside a comet_ask polling
+ * loop — neither response-text changes nor new step entries. Past this
+ * window we declare the agent stuck and return current state. Distinct
+ * from RESPONSE_IDLE_MS (which exits on a settled-but-present response);
+ * this fires even when no prose has appeared yet, so the loop doesn't
+ * burn maxTimeout when the agent stalls before emitting anything.
+ */
+export const STUCK_TIMEOUT_MS = 60_000;

@@ -29,6 +29,7 @@ import {
   STATUS_POLL_INTERVAL_MS,
   RESPONSE_IDLE_MS,
   RESPONSE_MIN_LEN,
+  STUCK_TIMEOUT_MS,
 } from "./cdp-timeouts.js";
 import { createProgressEmitter, formatProgressMessage } from "./streaming.js";
 
@@ -593,6 +594,35 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
                 return await completeWithSettledResponse(status.response);
               }
 
+              // Stuck-step failsafe. Fires regardless of sawNewResponse so a
+              // stall *before* any prose is emitted (the case the regular
+              // idle-time exit can't handle) doesn't burn maxTimeout. The
+              // exit message names the step the agent was on so the caller
+              // can decide whether to retry with a different prompt.
+              if (idleTime > STUCK_TIMEOUT_MS) {
+                const stuckStep = status.currentStep || sessionState.steps[sessionState.steps.length - 1] || '';
+                const stuckSeconds = Math.round(idleTime / 1000);
+                const stuckLines = [
+                  'Status: STUCK',
+                  `Reason: NO_PROGRESS for ${stuckSeconds}s`,
+                  '',
+                  stuckStep
+                    ? `The agent appears stuck at "${stuckStep}".`
+                    : 'The agent appears stuck (no step progress and no response text).',
+                  'Try a shorter prompt, switch tactics, or call comet_screenshot to inspect the page.',
+                ];
+                if (stepsCollected.length > 0) {
+                  stuckLines.push('', 'Steps so far:', ...stepsCollected.map(s => `  • ${s}`));
+                }
+                const partial = status.response || lastKnownResponse;
+                if (partial) {
+                  stuckLines.push('', 'Partial assistant output:', partial);
+                }
+                const message = stuckLines.join('\n');
+                completeTask(message, 'stuck', stuckStep || null);
+                return { content: [{ type: "text", text: message }] };
+              }
+
             } catch (e) {
               if (e instanceof DisconnectedError) {
                 try { await cometClient.reconnect(); } catch { /* will retry next iter */ }
@@ -659,7 +689,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         // already saw resolved minutes ago.
         const cached = readCachedResponse();
         if (cached) {
-          if (cached.terminalStatus === 'blocked' || cached.terminalStatus === 'skipped') {
+          if (
+            cached.terminalStatus === 'blocked' ||
+            cached.terminalStatus === 'skipped' ||
+            cached.terminalStatus === 'stuck'
+          ) {
             return { content: [{ type: "text", text: cached.text }] };
           }
           return { content: [{ type: "text", text: `Status: COMPLETED (${cached.ageSeconds}s ago)\n\n${cached.text}` }] };
