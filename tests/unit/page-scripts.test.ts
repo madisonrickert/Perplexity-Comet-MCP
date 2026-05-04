@@ -1,7 +1,11 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { readProseState, extractAgentStatus } from "../../src/page-scripts.js";
+import {
+  readProseState,
+  extractAgentStatus,
+  MAX_RESPONSE_CHARS,
+} from "../../src/page-scripts.js";
 
 beforeEach(() => {
   document.body.innerHTML = "";
@@ -193,6 +197,31 @@ describe("extractAgentStatus prose-first response extraction", () => {
     const result = extractAgentStatus();
     expect(result.response).toContain("forty-two");
     expect(result.response).not.toContain("Ask a follow-up");
+  });
+});
+
+describe("extractAgentStatus response cap", () => {
+  it("truncates the response at MAX_RESPONSE_CHARS and sets truncated=true", () => {
+    const longText = "a".repeat(MAX_RESPONSE_CHARS + 5000);
+    document.body.innerHTML = `<main><div class="prose">${longText}</div></main>`;
+
+    const result = extractAgentStatus();
+    expect(result.response.length).toBe(MAX_RESPONSE_CHARS);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("returns truncated=false for short responses", () => {
+    document.body.innerHTML = `<main><div class="prose">A short answer.</div></main>`;
+
+    const result = extractAgentStatus();
+    expect(result.truncated).toBe(false);
+    expect(result.response).toContain("A short answer");
+  });
+
+  it("MAX_RESPONSE_CHARS is at least 32000 (raised from the original 8000)", () => {
+    // Ensures the export stays in sync with the in-function literal —
+    // changing one without the other would silently drop the cap back.
+    expect(MAX_RESPONSE_CHARS).toBeGreaterThanOrEqual(32000);
   });
 });
 
