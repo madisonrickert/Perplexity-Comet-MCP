@@ -427,8 +427,14 @@ export class CometAI {
 
   /**
    * Get current agent status and progress (for polling)
+   *
+   * `proseWatermark` is the count of `[class*="prose"]` elements observed
+   * before the current task's prompt was sent. extractAgentStatus uses it
+   * to ignore prose blocks left over from a previous answer; without it,
+   * a poll fired before the agent has emitted new prose can return the
+   * previous task's response as the current one.
    */
-  async getAgentStatus(): Promise<{
+  async getAgentStatus(options: { proseWatermark?: number } = {}): Promise<{
     status: "idle" | "working" | "completed" | "blocked";
     steps: string[];
     currentStep: string;
@@ -451,7 +457,8 @@ export class CometAI {
       // Continue without URL
     }
 
-    const result = await this.client.safeEvaluate(`(${extractAgentStatus.toString()})()`);
+    const callArgs = JSON.stringify({ proseWatermark: options.proseWatermark ?? 0 });
+    const result = await this.client.safeEvaluate(`(${extractAgentStatus.toString()})(${callArgs})`);
 
     const statusResult = result.result.value as AgentStatusResult;
 

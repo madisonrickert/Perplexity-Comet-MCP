@@ -196,6 +196,52 @@ describe("extractAgentStatus prose-first response extraction", () => {
   });
 });
 
+describe("extractAgentStatus prose watermark", () => {
+  it("ignores prior prose blocks below the watermark when extracting the response", () => {
+    // Three prior prose blocks (a previous task's answer) plus one new block
+    // for the current task. With watermark=3, only the new one should count.
+    document.body.innerHTML = `
+      <main>
+        <div class="prose">PRIOR ANSWER BLOCK ONE — should be ignored</div>
+        <div class="prose">PRIOR ANSWER BLOCK TWO — should be ignored</div>
+        <div class="prose">PRIOR ANSWER BLOCK THREE — should be ignored</div>
+        <div class="prose">FRESH ANSWER for the current question.</div>
+      </main>
+    `;
+
+    const result = extractAgentStatus({ proseWatermark: 3 });
+    expect(result.response).toContain("FRESH ANSWER");
+    expect(result.response).not.toContain("PRIOR ANSWER");
+  });
+
+  it("returns no prose-derived response when the watermark covers every block", () => {
+    // No new prose has been emitted since the prompt was sent — the only
+    // prose elements present belong to a previous task. A poll fired in this
+    // window must not surface those as the current answer.
+    document.body.innerHTML = `
+      <main>
+        <div class="prose">stale answer text from a previous task</div>
+        <div class="prose">stale follow-up text from a previous task</div>
+      </main>
+    `;
+
+    const result = extractAgentStatus({ proseWatermark: 2 });
+    expect(result.response).not.toContain("stale answer");
+    expect(result.response).not.toContain("stale follow-up");
+  });
+
+  it("treats every prose block as new when no watermark is provided", () => {
+    document.body.innerHTML = `
+      <main>
+        <div class="prose">Photosynthesis converts light energy into chemical energy.</div>
+      </main>
+    `;
+
+    const result = extractAgentStatus();
+    expect(result.response).toContain("Photosynthesis");
+  });
+});
+
 describe("extractAgentStatus blocked-state detection", () => {
   it("returns status='blocked' when the logged-out browser banner is present", () => {
     document.body.innerHTML = `

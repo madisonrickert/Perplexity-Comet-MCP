@@ -5,6 +5,8 @@ import {
   completeTask,
   isSessionStale,
   generateTaskId,
+  readCachedResponse,
+  RESPONSE_CACHE_TTL_MS,
 } from "../../src/session-state.js";
 
 function resetSessionState(): void {
@@ -15,6 +17,7 @@ function resetSessionState(): void {
   sessionState.lastResponseTime = null;
   sessionState.lastTerminalStatus = null;
   sessionState.lastBlockedReason = null;
+  sessionState.proseBaselineCount = 0;
   sessionState.steps = [];
   sessionState.isActive = false;
 }
@@ -74,6 +77,16 @@ describe("startNewTask", () => {
     expect(sessionState.lastBlockedReason).toBeNull();
   });
 
+  it("resets proseBaselineCount to 0 for a fresh task", () => {
+    sessionState.proseBaselineCount = 7;
+
+    startNewTask("a fresh prompt");
+
+    // The handler is responsible for updating this to the live DOM count
+    // immediately after; startNewTask itself starts from a clean baseline.
+    expect(sessionState.proseBaselineCount).toBe(0);
+  });
+
   it("returns a task id that matches the format from generateTaskId", () => {
     const taskId = startNewTask("any");
     expect(taskId).toMatch(/^task_\d+_[0-9a-z]+$/);
@@ -109,6 +122,63 @@ describe("completeTask", () => {
     expect(sessionState.lastBlockedReason).toBe("login_required");
     expect(sessionState.isActive).toBe(false);
     expect(sessionState.lastResponse).toBe("[error message]");
+  });
+});
+
+describe("readCachedResponse", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("returns null when there is no cached response", () => {
+    expect(readCachedResponse()).toBeNull();
+  });
+
+  it("returns null while the session is still active", () => {
+    startNewTask("a prompt");
+    sessionState.lastResponse = "intermediate text";
+    sessionState.lastResponseTime = Date.now();
+    sessionState.lastTerminalStatus = "completed";
+    expect(readCachedResponse()).toBeNull();
+  });
+
+  it("returns the cached response when TTL has not elapsed", () => {
+    startNewTask("a prompt");
+    completeTask("the answer");
+    vi.advanceTimersByTime(RESPONSE_CACHE_TTL_MS - 1000);
+    const cached = readCachedResponse();
+    expect(cached).not.toBeNull();
+    expect(cached!.text).toBe("the answer");
+    expect(cached!.terminalStatus).toBe("completed");
+    expect(cached!.ageSeconds).toBe(Math.round((RESPONSE_CACHE_TTL_MS - 1000) / 1000));
+  });
+
+  it("returns null and evicts the cache once TTL has elapsed", () => {
+    startNewTask("a prompt");
+    completeTask("the answer");
+    vi.advanceTimersByTime(RESPONSE_CACHE_TTL_MS + 1000);
+    expect(readCachedResponse()).toBeNull();
+    // Eviction is a side effect that prevents subsequent polls from seeing
+    // the same answer surface back through other code paths.
+    expect(sessionState.lastResponse).toBeNull();
+    expect(sessionState.lastResponseTime).toBeNull();
+    expect(sessionState.lastTerminalStatus).toBeNull();
+    expect(sessionState.lastBlockedReason).toBeNull();
+  });
+
+  it("preserves blocked terminalStatus and blockedReason within TTL", () => {
+    startNewTask("a prompt");
+    completeTask("[blocked message]", "blocked", "login_required");
+    vi.advanceTimersByTime(5000);
+    const cached = readCachedResponse();
+    expect(cached).not.toBeNull();
+    expect(cached!.terminalStatus).toBe("blocked");
+    expect(cached!.blockedReason).toBe("login_required");
   });
 });
 
