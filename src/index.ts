@@ -98,7 +98,7 @@ const TOOLS: Tool[] = [
         },
         domain: {
           type: "string",
-          description: "For switch/close: domain to match (e.g., 'github.com')",
+          description: "For switch/close: domain to match (e.g., 'github.com'). When multiple tabs share a domain, prefer url_substring or tab_index for disambiguation.",
         },
         tabId: {
           type: "string",
@@ -106,7 +106,11 @@ const TOOLS: Tool[] = [
         },
         url_substring: {
           type: "string",
-          description: "For close-others: URL substring of the tab to preserve (alternative to tabId).",
+          description: "For switch: URL substring to match the first tab whose URL contains it. For close-others: URL substring of the tab to preserve (alternative to tabId).",
+        },
+        tab_index: {
+          type: "number",
+          description: "For switch: 0-based index into the tab list (use after `list` to disambiguate multiple tabs on the same domain).",
         },
       },
     },
@@ -331,6 +335,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         // Mirror to sessionState so comet_poll can compute a tabsOpened
         // delta for callers monitoring tab proliferation during the task.
         sessionState.tabBaselineExternalIds = [...baselineExternalTabIds];
+        // Snapshot the lifetime reconnect counter so callers can see how
+        // much transport flakiness this specific task incurred.
+        sessionState.reconnectBaseline = cometClient.reconnectCount;
         let blockedReason: string | null = null;
         let blockedMessage: string | null = null;
 
@@ -825,6 +832,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
           // ignore tab-listing transient failures
         }
 
+        // Reconnect delta — high values hint that transport flakiness, not
+        // the agent itself, is making this task feel slow.
+        const reconnects = cometClient.reconnectCount - sessionState.reconnectBaseline;
+        if (reconnects > 0) {
+          output += `CDP reconnects during task: ${reconnects}\n`;
+        }
+
         // Combine session steps with current status steps
         const allSteps = [...new Set([...sessionState.steps, ...status.steps])];
         if (allSteps.length > 0) {
@@ -874,6 +888,39 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
               await cometClient.connect(tabId);
               return { content: [{ type: "text", text: `Switched to tab: ${tabId}` }] };
             }
+
+            // url_substring lets callers disambiguate between multiple tabs
+            // on the same domain (the domain match is too lenient when an
+            // agent has spawned several siblings on e.g. amazon.com).
+            const urlSubstring = args?.url_substring as string | undefined;
+            if (urlSubstring) {
+              const tabs = await cometClient.getTabContexts();
+              const matches = tabs.filter(t => t.url.includes(urlSubstring));
+              if (matches.length === 0) {
+                return { content: [{ type: "text", text: `No tab found with URL containing: ${urlSubstring}` }], isError: true };
+              }
+              const target = matches[0];
+              await cometClient.connect(target.id);
+              return { content: [{ type: "text", text: `Switched to ${target.domain} (${target.url})` }] };
+            }
+
+            // tab_index targets the Nth tab in getTabContexts() order
+            // (0-based). Useful when the caller has just listed tabs and
+            // wants the second amazon.com one without quoting the URL.
+            const tabIndexRaw = args?.tab_index;
+            if (typeof tabIndexRaw === 'number' && Number.isInteger(tabIndexRaw) && tabIndexRaw >= 0) {
+              const tabs = await cometClient.getTabContexts();
+              if (tabIndexRaw >= tabs.length) {
+                return {
+                  content: [{ type: "text", text: `tab_index ${tabIndexRaw} out of range (only ${tabs.length} tab(s) open)` }],
+                  isError: true,
+                };
+              }
+              const target = tabs[tabIndexRaw];
+              await cometClient.connect(target.id);
+              return { content: [{ type: "text", text: `Switched to ${target.domain} (${target.url})` }] };
+            }
+
             if (domain) {
               const tab = await cometClient.findTabByDomain(domain);
               if (tab) {
@@ -882,7 +929,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
               }
               return { content: [{ type: "text", text: `No tab found for domain: ${domain}` }], isError: true };
             }
-            return { content: [{ type: "text", text: "Specify domain or tabId to switch" }], isError: true };
+            return { content: [{ type: "text", text: "Specify domain, tabId, url_substring, or tab_index to switch" }], isError: true };
           }
 
           case 'close': {

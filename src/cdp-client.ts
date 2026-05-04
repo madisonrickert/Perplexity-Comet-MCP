@@ -210,6 +210,14 @@ export class CometCDPClient {
   private lastTargetId: string | undefined;
   private reconnectAttempts: number = 0;
   private maxReconnectAttempts: number = 10;
+  /**
+   * Cumulative reconnect counter across the lifetime of this CDP client.
+   * Unlike `reconnectAttempts` (which resets to 0 on a successful op for
+   * the exponential-backoff loop), this only ever increments. Surfaced in
+   * comet_poll output so callers can tell when transport flakiness is the
+   * reason a task feels slow.
+   */
+  private reconnectsSinceStart: number = 0;
   private isReconnecting: boolean = false;
   private connectionCheckInterval: NodeJS.Timeout | null = null;
   private lastHealthCheck: number = 0;
@@ -392,9 +400,17 @@ export class CometCDPClient {
   }
 
   /**
+   * Cumulative reconnects since this client was constructed. Read-only.
+   */
+  get reconnectCount(): number {
+    return this.reconnectsSinceStart;
+  }
+
+  /**
    * Reconnect to the last connected tab
    */
   async reconnect(): Promise<string> {
+    this.reconnectsSinceStart++;
     if (this.client) {
       try { await this.client.close(); } catch { /* ignore */ }
     }
@@ -767,6 +783,15 @@ export class CometCDPClient {
       const task = tab.taskId ? ` (task: ${tab.taskId})` : "";
       const summary = tab.contentSummary ? ` - ${tab.contentSummary}` : "";
       lines.push(`  • ${tab.purpose.toUpperCase()}: ${tab.domain}${active}${task}${summary}`);
+      // Page title disambiguates tabs that share a domain or URL prefix
+      // (e.g. multiple amazon.com tabs in different storefront states).
+      // Only emit a title line when there's something useful to show.
+      if (tab.title && tab.title.trim().length > 0 && tab.title !== tab.url) {
+        const titleTrimmed = tab.title.length > 80
+          ? tab.title.substring(0, 80) + '…'
+          : tab.title;
+        lines.push(`    Title: ${titleTrimmed}`);
+      }
       lines.push(`    URL: ${tab.url.substring(0, 80)}${tab.url.length > 80 ? '...' : ''}`);
     }
 
