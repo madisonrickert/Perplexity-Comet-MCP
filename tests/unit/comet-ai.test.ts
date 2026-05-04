@@ -1,11 +1,68 @@
 import { describe, it, expect } from "vitest";
-import { CometAI } from "../../src/comet-ai.js";
+import { CometAI, pollUntil } from "../../src/comet-ai.js";
 import { FakeCdpClient } from "./fakes/fake-cdp-client.js";
 
 // `isResponseStable` only tracks responses longer than 50 characters
 // (short responses never stabilize). Use long strings in assertions.
 const ANSWER_A = "A".repeat(60);
 const ANSWER_B = "B".repeat(60);
+
+describe("pollUntil", () => {
+  it("returns true immediately when the predicate is true on first call", async () => {
+    let calls = 0;
+    const result = await pollUntil(
+      async () => {
+        calls++;
+        return true;
+      },
+      { maxMs: 1000, intervalMs: 5 },
+    );
+    expect(result).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  it("returns true once a delayed predicate flips to true", async () => {
+    let calls = 0;
+    const result = await pollUntil(
+      async () => {
+        calls++;
+        return calls >= 3;
+      },
+      { maxMs: 1000, intervalMs: 5 },
+    );
+    expect(result).toBe(true);
+    expect(calls).toBe(3);
+  });
+
+  it("returns false when the predicate never becomes true within maxMs", async () => {
+    const result = await pollUntil(async () => false, { maxMs: 60, intervalMs: 10 });
+    expect(result).toBe(false);
+  });
+
+  it("propagates predicate errors to the caller", async () => {
+    await expect(
+      pollUntil(async () => {
+        throw new Error("transport gone");
+      }, { maxMs: 100, intervalMs: 5 }),
+    ).rejects.toThrow("transport gone");
+  });
+
+  it("respects an injected `now` so deadline comparisons can be deterministic", async () => {
+    let virtual = 0;
+    let calls = 0;
+    const result = await pollUntil(
+      async () => {
+        calls++;
+        virtual += 100; // each call advances simulated time by 100ms
+        return false;
+      },
+      { maxMs: 250, intervalMs: 1, now: () => virtual },
+    );
+    expect(result).toBe(false);
+    // virtual time crosses the 250ms deadline on the third call (0 → 100 → 200 → 300).
+    expect(calls).toBe(3);
+  });
+});
 
 describe("CometAI.isResponseStable", () => {
   it("returns false on the first observation of any response", () => {

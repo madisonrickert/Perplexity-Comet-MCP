@@ -5,6 +5,35 @@ import { cometClient } from "./cdp-client.js";
 import { extractAgentStatus, type AgentStatusResult } from "./page-scripts.js";
 
 /**
+ * Poll an async predicate until it returns true or the deadline passes.
+ *
+ * Used in place of fixed `setTimeout` waits when we're waiting for
+ * something the page is going to do "soon" — e.g. React rendering text
+ * into a contenteditable after `execCommand`. A long fixed delay slows
+ * down the happy path; a short one fails on slow renders. Polling
+ * gives us both: fast when the condition is already met, patient when
+ * it isn't.
+ *
+ * Returns true if `predicate()` ever resolves truthy within `maxMs`,
+ * false if the deadline elapses without success. Predicate errors
+ * propagate (so callers learn about transport failures).
+ */
+export async function pollUntil(
+  predicate: () => Promise<boolean>,
+  options: { maxMs?: number; intervalMs?: number; now?: () => number } = {},
+): Promise<boolean> {
+  const maxMs = options.maxMs ?? 1500;
+  const intervalMs = options.intervalMs ?? 50;
+  const now = options.now ?? (() => Date.now());
+  const deadline = now() + maxMs;
+  while (now() < deadline) {
+    if (await predicate()) return true;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return false;
+}
+
+/**
  * Minimal CDP-client surface used by `CometAI.getAgentStatus`. Letting
  * callers inject a stand-in (in unit tests) avoids spinning up real
  * CDP infrastructure to exercise the status-extraction logic. Methods
@@ -183,31 +212,36 @@ export class CometAI {
   }
 
   private async submitPrompt(): Promise<void> {
-    // Wait for React to process the typed content
-    await new Promise(resolve => setTimeout(resolve, 300));
+    // Poll for typed content rather than blindly waiting a fixed delay.
+    // The page renders the typed text inside React's tick — usually
+    // immediate, occasionally up to a second on slower CPUs. A fixed
+    // 300ms wait used to either over-wait (delaying the happy path) or
+    // under-wait (false negative on slow renders). Polling at 50ms up
+    // to 1500ms gives us both fast success and tolerance for slow paint.
+    const hasContent = await pollUntil(async () => {
+      const result = await cometClient.evaluate(`
+        (() => {
+          const candidates = [...document.querySelectorAll('textarea, input[type="text"], [role="textbox"], [contenteditable]')]
+            .filter((el) => {
+              const rect = el.getBoundingClientRect();
+              const style = window.getComputedStyle(el);
+              return rect.width > 0 &&
+                rect.height > 0 &&
+                style.display !== 'none' &&
+                style.visibility !== 'hidden';
+            })
+            .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
 
-    // Verify text was typed before attempting submit
-    const hasContent = await cometClient.evaluate(`
-      (() => {
-        const candidates = [...document.querySelectorAll('textarea, input[type="text"], [role="textbox"], [contenteditable]')]
-          .filter((el) => {
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            return rect.width > 0 &&
-              rect.height > 0 &&
-              style.display !== 'none' &&
-              style.visibility !== 'hidden';
-          })
-          .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom);
+          const el = candidates[0];
+          if (!el) return false;
+          if (el.matches('[contenteditable], [role="textbox"]')) return el.innerText.trim().length > 0;
+          return 'value' in el && el.value.trim().length > 0;
+        })()
+      `);
+      return result.result.value === true;
+    });
 
-        const el = candidates[0];
-        if (!el) return false;
-        if (el.matches('[contenteditable], [role="textbox"]')) return el.innerText.trim().length > 0;
-        return 'value' in el && el.value.trim().length > 0;
-      })()
-    `);
-
-    if (!hasContent.result.value) {
+    if (!hasContent) {
       throw new Error("Prompt text not found in input - typing may have failed");
     }
 
